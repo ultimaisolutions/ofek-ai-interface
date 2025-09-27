@@ -3,6 +3,7 @@ import './App.css'
 import { sendMessageToWebhookWithRetry, generateUUID } from './services/webhookService'
 import responseListenerService from './services/responseListenerService'
 import httpLogger from './services/httpLoggerService'
+import { sanitizeUserInput } from './services/inputSanitizationService'
 
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
@@ -245,7 +246,7 @@ function App() {
     const userMessage = {
       id: generateUUID(),
       type: 'user',
-      content: inputValue.trim(),
+      content: sanitizeUserInput(inputValue),
       timestamp: new Date()
     }
 
