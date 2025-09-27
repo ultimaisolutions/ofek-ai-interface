@@ -594,10 +594,6 @@
   font-weight: 500;
 }
 
-.health-indicator {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-}
 
 .pending-count {
   color: var(--accent-blue);
@@ -632,6 +628,33 @@
 }
 
 .retry-btn:disabled {
+  background: var(--accent-bg);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.connection-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+}
+
+.test-connection-btn {
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: var(--accent-blue);
+  color: white;
+  font-size: 0.8rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.test-connection-btn:hover {
+  background: var(--accent-blue-hover);
+}
+
+.test-connection-btn:disabled {
   background: var(--accent-bg);
   cursor: not-allowed;
   opacity: 0.6;

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-import { sendMessageToWebhookWithRetry, generateUUID, checkWebhookHealth } from './services/webhookService'
+import { sendMessageToWebhookWithRetry, generateUUID } from './services/webhookService'
 import responseListenerService from './services/responseListenerService'
+import httpLogger from './services/httpLoggerService'
 
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
@@ -21,7 +22,6 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
   const [pendingResponseCount, setPendingResponseCount] = useState(0)
   const [lastConnectionError, setLastConnectionError] = useState(null)
-  const [webhookHealth, setWebhookHealth] = useState({ isHealthy: false, lastChecked: null })
   const [messageStates, setMessageStates] = useState(new Map())
 
   // Load data from localStorage on component mount
@@ -94,8 +94,17 @@ function App() {
 
   // Initialize response listener service
   useEffect(() => {
+    httpLogger.createLogEntry('INFO', 'APP_LIFECYCLE',
+      'App component mounting - initializing response listener service',
+      {}
+    );
+
     // Set up event listeners for response service
     const handleStatusChange = (data) => {
+      httpLogger.logStateChange('App', 'connectionStatus', connectionStatus, data.status, {
+        timestamp: data.timestamp
+      });
+
       setConnectionStatus(data.status)
       if (data.status === 'error') {
         setLastConnectionError({
@@ -108,11 +117,25 @@ function App() {
     }
 
     const handleMessageReceived = (data) => {
-      console.log('AI response received:', data)
+      const messageId = data.correlationId || data.messageId;
+
+      httpLogger.createLogEntry('INFO', 'APP_MESSAGE',
+        'AI response received in App component',
+        {
+          messageId,
+          source: data.source,
+          contentLength: data.content?.length || 0,
+          hasError: !!data.error
+        }
+      );
 
       // Update message state
-      if (data.correlationId || data.messageId) {
-        const messageId = data.correlationId || data.messageId
+      if (messageId) {
+        httpLogger.logStateChange('App', 'messageStates',
+          messageStates.get(messageId), 'response_received', {
+          messageId
+        });
+
         setMessageStates(prev => {
           const newStates = new Map(prev)
           newStates.set(messageId, 'response_received')
@@ -127,7 +150,7 @@ function App() {
         content: data.content || data.error || 'Received response from AI service',
         timestamp: new Date(),
         responseData: data,
-        correlationId: data.correlationId || data.messageId
+        correlationId: messageId
       }
 
       setMessages(prev => [...prev, aiMessage])
@@ -180,29 +203,17 @@ function App() {
     responseListenerService.addEventListener('messageTimeout', handleMessageTimeout)
     responseListenerService.addEventListener('connectionFailed', handleConnectionFailed)
 
-    // Start listening for responses
-    responseListenerService.startListening()
-
-    // Check webhook health periodically
-    const healthCheckInterval = setInterval(async () => {
-      try {
-        const health = await checkWebhookHealth()
-        setWebhookHealth({
-          ...health,
-          lastChecked: new Date()
-        })
-      } catch (error) {
-        console.error('Health check failed:', error)
+    // FIXED: Do NOT start listening on app mount - only start when actually sending messages
+    httpLogger.createLogEntry('INFO', 'APP_LIFECYCLE',
+      'Response listener service initialized but NOT started - will only start when sending messages',
+      {
+        fix: 'Removed automatic startListening() call to prevent unnecessary polling'
       }
-    }, 30000) // Check every 30 seconds
+    );
 
-    // Initial health check
-    checkWebhookHealth().then(health => {
-      setWebhookHealth({
-        ...health,
-        lastChecked: new Date()
-      })
-    })
+    // DO NOT START LISTENING HERE - this was the root cause of unnecessary polling
+    // responseListenerService.startListening() // REMOVED - causing unnecessary requests
+
 
     // Cleanup
     return () => {
@@ -211,7 +222,6 @@ function App() {
       responseListenerService.removeEventListener('messageTimeout', handleMessageTimeout)
       responseListenerService.removeEventListener('connectionFailed', handleConnectionFailed)
       responseListenerService.stopListening()
-      clearInterval(healthCheckInterval)
     }
   }, [])
 
@@ -239,11 +249,20 @@ function App() {
       timestamp: new Date()
     }
 
+    httpLogger.logMessageFlow(userMessage.id, 'USER_MESSAGE_CREATED', {
+      contentLength: userMessage.content.length,
+      contentPreview: userMessage.content.substring(0, 50) + (userMessage.content.length > 50 ? '...' : '')
+    });
+
     setMessages(prev => [...prev, userMessage])
     setInputValue('')
     setIsSending(true)
 
     // Set initial message state
+    httpLogger.logStateChange('App', 'messageStates', null, 'sending', {
+      messageId: userMessage.id
+    });
+
     setMessageStates(prev => {
       const newStates = new Map(prev)
       newStates.set(userMessage.id, 'sending')
@@ -473,11 +492,6 @@ function App() {
             <span className="connection-text">
               {getConnectionStatusInfo().text}
             </span>
-            {webhookHealth.isHealthy && (
-              <span className="health-indicator">
-                • Webhook: Online
-              </span>
-            )}
             {pendingResponseCount > 0 && (
               <span className="pending-count">
                 • Waiting for {pendingResponseCount} response{pendingResponseCount !== 1 ? 's' : ''}
@@ -494,6 +508,18 @@ function App() {
                 disabled={connectionStatus === 'connecting'}
               >
                 Retry
+              </button>
+            </div>
+          )}
+
+          {!lastConnectionError && connectionStatus === 'disconnected' && (
+            <div className="connection-controls">
+              <button
+                className="test-connection-btn"
+                onClick={retryConnection}
+                disabled={connectionStatus === 'connecting'}
+              >
+                Test Connection
               </button>
             </div>
           )}

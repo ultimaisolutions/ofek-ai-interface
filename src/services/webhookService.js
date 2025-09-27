@@ -1,3 +1,5 @@
+import httpLogger from './httpLoggerService.js';
+
 // Simple UUID v4 generation function
 const generateUUID = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -14,6 +16,12 @@ export const sendMessageToWebhook = async (message, options = {}) => {
   // Generate unique message ID if not provided
   const messageId = message.id || generateUUID();
 
+  // Log message flow start
+  httpLogger.logMessageFlow(messageId, 'WEBHOOK_SEND_START', {
+    messageContent: message.content?.substring(0, 100) + (message.content?.length > 100 ? '...' : ''),
+    options
+  });
+
   // Prepare query parameters with response correlation
   const params = new URLSearchParams({
     messageType: message.type || 'text',
@@ -28,8 +36,10 @@ export const sendMessageToWebhook = async (message, options = {}) => {
 
   const requestUrl = `${webhookUrl}?${params.toString()}`;
 
-  console.log('Sending webhook request to:', requestUrl);
-  console.log('Message ID for correlation:', messageId);
+  // Start HTTP request logging
+  const requestLogger = httpLogger.logHttpRequest('GET', requestUrl, {
+    retryAttempt: options.retryAttempt || 0
+  });
 
   try {
     // Send GET request to webhook (no custom headers to avoid CORS preflight)
@@ -38,22 +48,55 @@ export const sendMessageToWebhook = async (message, options = {}) => {
     });
 
     if (!response.ok) {
-      throw new Error(`Webhook request failed: ${response.status} ${response.statusText}`);
+      const error = new Error(`Webhook request failed: ${response.status} ${response.statusText}`);
+      requestLogger.logResponse(response, null, error);
+      throw error;
     }
 
     // Return response data if available
     const data = await response.text();
 
+    // Log the raw response
+    requestLogger.logResponse(response, data);
+
     // Check if this is an immediate response or acknowledgment
     let parsedData = null;
     let isAcknowledgment = false;
+    let responseType = 'unknown';
 
     try {
       parsedData = JSON.parse(data);
-      isAcknowledgment = parsedData.status === 'acknowledged' || parsedData.type === 'acknowledgment';
+
+      // Handle array response format: [{"output": "message"}]
+      if (Array.isArray(parsedData) && parsedData.length > 0 && parsedData[0].output) {
+        parsedData = { content: parsedData[0].output };
+        responseType = 'immediate_response';
+        isAcknowledgment = false;
+      } else {
+        // Handle object response format: {"status": "acknowledged"} or {"content": "message"}
+        isAcknowledgment = parsedData.status === 'acknowledged' || parsedData.type === 'acknowledgment';
+        responseType = isAcknowledgment ? 'acknowledgment' : 'immediate_response';
+      }
     } catch {
       // Plain text response
       parsedData = { content: data };
+      responseType = data ? 'text_response' : 'empty_response';
+    }
+
+    // Log message flow outcome
+    httpLogger.logMessageFlow(messageId, 'WEBHOOK_RESPONSE_RECEIVED', {
+      responseType,
+      isAcknowledgment,
+      responseLength: data?.length || 0,
+      responsePreview: data?.substring(0, 200) + (data?.length > 200 ? '...' : '')
+    });
+
+    // Log if acknowledgment triggers response listener
+    if (isAcknowledgment) {
+      httpLogger.createLogEntry('WARN', 'MESSAGE_FLOW',
+        `Message ${messageId}: Acknowledgment received - will trigger response listener system`,
+        { messageId, parsedData }
+      );
     }
 
     return {
@@ -63,12 +106,17 @@ export const sendMessageToWebhook = async (message, options = {}) => {
       messageId: messageId,
       isAcknowledgment: isAcknowledgment,
       timestamp: new Date(),
-      requestUrl: requestUrl
+      requestUrl: requestUrl,
+      correlationId: requestLogger.correlationId
     };
 
   } catch (error) {
-    console.error('Webhook request failed:', error);
-    console.error('Request URL was:', requestUrl);
+    // Log error with full context
+    httpLogger.logMessageFlow(messageId, 'WEBHOOK_ERROR', {
+      error: error.message,
+      requestUrl,
+      stack: error.stack
+    });
 
     // Return error details
     return {
@@ -76,7 +124,8 @@ export const sendMessageToWebhook = async (message, options = {}) => {
       error: error.message,
       messageId: messageId,
       requestUrl: requestUrl,
-      timestamp: new Date()
+      timestamp: new Date(),
+      correlationId: requestLogger.correlationId
     };
   }
 };
@@ -95,14 +144,28 @@ const generateSessionId = () => {
 
 // Retry logic with exponential backoff
 export const sendMessageToWebhookWithRetry = async (message, options = {}, maxRetries = 3, baseDelay = 1000) => {
+  const messageId = message.id || generateUUID();
   let lastError;
   let lastResult;
 
+  httpLogger.logMessageFlow(messageId, 'WEBHOOK_RETRY_START', {
+    maxRetries,
+    baseDelay
+  });
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const result = await sendMessageToWebhook(message, options);
+      // Add retry attempt info to options
+      const retryOptions = { ...options, retryAttempt: attempt };
+      const result = await sendMessageToWebhook(message, retryOptions);
 
       if (result.success) {
+        if (attempt > 0) {
+          httpLogger.logMessageFlow(messageId, 'WEBHOOK_RETRY_SUCCESS', {
+            attempt: attempt + 1,
+            totalAttempts: maxRetries
+          });
+        }
         return result;
       }
 
@@ -112,7 +175,10 @@ export const sendMessageToWebhookWithRetry = async (message, options = {}, maxRe
       // Don't retry on the last attempt
       if (attempt < maxRetries - 1) {
         const delay = baseDelay * Math.pow(2, attempt);
-        console.log(`Webhook retry ${attempt + 1}/${maxRetries} in ${delay}ms...`);
+        httpLogger.createLogEntry('WARN', 'MESSAGE_FLOW',
+          `Message ${messageId}: Retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
+          { messageId, attempt, delay, error: lastError }
+        );
         await new Promise(resolve => setTimeout(resolve, delay));
       }
 
@@ -122,43 +188,29 @@ export const sendMessageToWebhookWithRetry = async (message, options = {}, maxRe
       // Don't retry on the last attempt
       if (attempt < maxRetries - 1) {
         const delay = baseDelay * Math.pow(2, attempt);
-        console.log(`Webhook retry ${attempt + 1}/${maxRetries} in ${delay}ms...`);
+        httpLogger.createLogEntry('ERROR', 'MESSAGE_FLOW',
+          `Message ${messageId}: Retry ${attempt + 1}/${maxRetries} in ${delay}ms (Exception)`,
+          { messageId, attempt, delay, error: error.message, stack: error.stack }
+        );
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
 
+  // All retries failed
+  httpLogger.logMessageFlow(messageId, 'WEBHOOK_RETRY_FAILED', {
+    totalAttempts: maxRetries,
+    finalError: lastError
+  });
+
   return {
     success: false,
     error: `Failed after ${maxRetries} attempts. Last error: ${lastError}`,
-    messageId: message.id || generateUUID(),
+    messageId: messageId,
     timestamp: new Date(),
     lastResult: lastResult
   };
 };
 
-// Utility function to check webhook health
-export const checkWebhookHealth = async () => {
-  const healthUrl = 'https://ultimaisolutions.app.n8n.cloud/webhook-test/interface-chat/health';
-
-  try {
-    const response = await fetch(healthUrl, {
-      method: 'GET'
-    });
-
-    return {
-      isHealthy: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      timestamp: new Date()
-    };
-  } catch (error) {
-    return {
-      isHealthy: false,
-      error: error.message,
-      timestamp: new Date()
-    };
-  }
-};
 
 export { generateUUID };

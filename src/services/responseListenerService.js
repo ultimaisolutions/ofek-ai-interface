@@ -1,3 +1,5 @@
+import httpLogger from './httpLoggerService.js';
+
 // Response Listener Service for handling webhook responses
 // Implements SSE, WebSocket, and polling fallback mechanisms
 
@@ -60,17 +62,40 @@ class ResponseListenerService {
 
   // Start listening for responses - tries SSE first, then WebSocket, then polling
   async startListening(messageId = null) {
-    console.log('Starting response listener...');
+    httpLogger.createLogEntry('INFO', 'RESPONSE_LISTENER',
+      'Starting response listener service',
+      {
+        messageId,
+        currentPendingCount: this.pendingMessages.size,
+        connectionStatus: this.connectionStatus
+      }
+    );
+
+    // Stop any existing connections before starting new ones
+    this.stopListening();
+
     this.updateConnectionStatus('connecting');
 
     // If messageId provided, track it for response correlation
     if (messageId) {
+      httpLogger.logMessageFlow(messageId, 'RESPONSE_TRACKING_START', {
+        responseTimeout: this.config.responseTimeout
+      });
+
       this.pendingMessages.set(messageId, {
         timestamp: new Date(),
         timeout: setTimeout(() => {
           this.handleMessageTimeout(messageId);
         }, this.config.responseTimeout)
       });
+    } else {
+      httpLogger.createLogEntry('WARN', 'RESPONSE_LISTENER',
+        'Starting listener without messageId - this may cause unnecessary polling',
+        {
+          currentPendingCount: this.pendingMessages.size,
+          recommendation: 'Only call startListening() with a messageId when expecting a response'
+        }
+      );
     }
 
     // Try SSE first (most efficient)
@@ -89,23 +114,34 @@ class ResponseListenerService {
 
   // Server-Sent Events implementation
   async tryServerSentEvents() {
-    try {
-      console.log('Attempting SSE connection...');
+    const sseCorrelationId = httpLogger.logSSEEvent('connecting', this.config.sseEndpoint, {
+      pendingMessages: this.pendingMessages.size
+    });
 
+    try {
       this.eventSource = new EventSource(this.config.sseEndpoint);
 
       this.eventSource.onopen = () => {
-        console.log('SSE connected successfully');
+        httpLogger.logSSEEvent('connected', this.config.sseEndpoint, {
+          correlationId: sseCorrelationId
+        });
         this.updateConnectionStatus('connected');
         this.reconnectAttempts = 0;
       };
 
       this.eventSource.onmessage = (event) => {
+        httpLogger.logSSEEvent('message', this.config.sseEndpoint, {
+          correlationId: sseCorrelationId,
+          dataPreview: event.data?.substring(0, 100) + (event.data?.length > 100 ? '...' : '')
+        });
         this.handleIncomingMessage(event.data, 'sse');
       };
 
       this.eventSource.onerror = (error) => {
-        console.error('SSE connection error:', error);
+        httpLogger.logSSEEvent('error', this.config.sseEndpoint, {
+          correlationId: sseCorrelationId,
+          error: error.toString()
+        });
         this.eventSource.close();
         this.eventSource = null;
         this.handleConnectionError('sse');
@@ -115,6 +151,12 @@ class ResponseListenerService {
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           if (this.eventSource && this.eventSource.readyState !== EventSource.OPEN) {
+            httpLogger.createLogEntry('WARN', 'SSE',
+              'SSE connection timeout', {
+                correlationId: sseCorrelationId,
+                timeout: this.config.connectionTimeout
+              }
+            );
             this.eventSource.close();
             this.eventSource = null;
             resolve(false);
@@ -124,7 +166,9 @@ class ResponseListenerService {
         if (this.eventSource) {
           this.eventSource.onopen = () => {
             clearTimeout(timeout);
-            console.log('SSE connected successfully');
+            httpLogger.logSSEEvent('connected', this.config.sseEndpoint, {
+              correlationId: sseCorrelationId
+            });
             this.updateConnectionStatus('connected');
             this.reconnectAttempts = 0;
             resolve(true);
@@ -133,21 +177,33 @@ class ResponseListenerService {
       });
 
     } catch (error) {
-      console.error('SSE setup failed:', error);
+      httpLogger.logSSEEvent('error', this.config.sseEndpoint, {
+        correlationId: sseCorrelationId,
+        error: error.message,
+        stack: error.stack
+      });
       return false;
     }
   }
 
   // WebSocket implementation
   async tryWebSocket() {
-    try {
-      console.log('Attempting WebSocket connection...');
+    const wsCorrelationId = httpLogger.logWebSocketEvent('connecting', this.config.wsEndpoint, {
+      pendingMessages: this.pendingMessages.size
+    });
 
+    try {
       this.webSocket = new WebSocket(this.config.wsEndpoint);
 
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           if (this.webSocket && this.webSocket.readyState !== WebSocket.OPEN) {
+            httpLogger.createLogEntry('WARN', 'WEBSOCKET',
+              'WebSocket connection timeout', {
+                correlationId: wsCorrelationId,
+                timeout: this.config.connectionTimeout
+              }
+            );
             this.webSocket.close();
             this.webSocket = null;
             resolve(false);
@@ -156,78 +212,169 @@ class ResponseListenerService {
 
         this.webSocket.onopen = () => {
           clearTimeout(timeout);
-          console.log('WebSocket connected successfully');
+          httpLogger.logWebSocketEvent('connected', this.config.wsEndpoint, {
+            correlationId: wsCorrelationId
+          });
           this.updateConnectionStatus('connected');
           this.reconnectAttempts = 0;
           resolve(true);
         };
 
         this.webSocket.onmessage = (event) => {
+          httpLogger.logWebSocketEvent('message', this.config.wsEndpoint, {
+            correlationId: wsCorrelationId,
+            dataPreview: event.data?.substring(0, 100) + (event.data?.length > 100 ? '...' : '')
+          });
           this.handleIncomingMessage(event.data, 'websocket');
         };
 
         this.webSocket.onerror = (error) => {
           clearTimeout(timeout);
-          console.error('WebSocket connection error:', error);
+          httpLogger.logWebSocketEvent('error', this.config.wsEndpoint, {
+            correlationId: wsCorrelationId,
+            error: error.toString()
+          });
           this.webSocket = null;
           resolve(false);
         };
 
         this.webSocket.onclose = () => {
+          httpLogger.logWebSocketEvent('closed', this.config.wsEndpoint, {
+            correlationId: wsCorrelationId
+          });
           this.webSocket = null;
           this.handleConnectionError('websocket');
         };
       });
 
     } catch (error) {
-      console.error('WebSocket setup failed:', error);
+      httpLogger.logWebSocketEvent('error', this.config.wsEndpoint, {
+        correlationId: wsCorrelationId,
+        error: error.message,
+        stack: error.stack
+      });
       return false;
     }
   }
 
   // Polling implementation (fallback)
   startPolling() {
-    console.log('Starting polling fallback...');
+    httpLogger.createLogEntry('WARN', 'RESPONSE_LISTENER',
+      'Falling back to polling - this will generate continuous GET requests',
+      {
+        pollingInterval: this.config.pollingInterval,
+        pendingMessages: this.pendingMessages.size,
+        pollingEndpoint: this.config.pollingEndpoint
+      }
+    );
+
     this.updateConnectionStatus('connected');
 
     this.pollingInterval = setInterval(async () => {
       try {
         await this.pollForMessages();
       } catch (error) {
-        console.error('Polling error:', error);
+        httpLogger.createLogEntry('ERROR', 'POLLING',
+          'Polling error occurred', {
+            error: error.message,
+            stack: error.stack,
+            pendingMessages: this.pendingMessages.size
+          }
+        );
         this.handleConnectionError('polling');
       }
     }, this.config.pollingInterval);
+
+    // Log initial polling start
+    httpLogger.logPerformance('POLLING_START', 0, {
+      intervalMs: this.config.pollingInterval,
+      endpoint: this.config.pollingEndpoint
+    });
   }
 
   // Poll for new messages
   async pollForMessages() {
     const pendingIds = Array.from(this.pendingMessages.keys());
-    if (pendingIds.length === 0) return;
+
+    // FIXED: Stop polling when no pending messages - prevents unnecessary GET requests!
+    if (pendingIds.length === 0) {
+      httpLogger.createLogEntry('INFO', 'POLLING',
+        'No pending messages - stopping polling to prevent unnecessary requests',
+        {
+          pollingEndpoint: this.config.pollingEndpoint,
+          pollingInterval: this.config.pollingInterval,
+          action: 'stopping_polling_interval'
+        }
+      );
+
+      // Clear the polling interval when no messages are pending
+      if (this.pollingInterval) {
+        clearInterval(this.pollingInterval);
+        this.pollingInterval = null;
+        httpLogger.createLogEntry('INFO', 'POLLING', 'Polling interval stopped - no more unnecessary requests', {});
+      }
+      return;
+    }
 
     const params = new URLSearchParams({
       messageIds: pendingIds.join(','),
       timestamp: new Date().toISOString()
     });
 
-    const response = await fetch(`${this.config.pollingEndpoint}?${params}`, {
+    const requestUrl = `${this.config.pollingEndpoint}?${params}`;
+
+    // Log the polling request
+    const requestLogger = httpLogger.logHttpRequest('GET', requestUrl);
+
+    httpLogger.createLogEntry('DEBUG', 'POLLING',
+      `Polling for ${pendingIds.length} pending message(s)`,
+      {
+        pendingIds,
+        pollingEndpoint: this.config.pollingEndpoint
+      }
+    );
+
+    const response = await fetch(requestUrl, {
       method: 'GET'
     });
 
     if (!response.ok) {
-      throw new Error(`Polling failed: ${response.status}`);
+      const error = new Error(`Polling failed: ${response.status}`);
+      requestLogger.logResponse(response, null, error);
+      throw error;
     }
 
     const data = await response.text();
+    requestLogger.logResponse(response, data);
+
     if (data) {
+      httpLogger.createLogEntry('INFO', 'POLLING',
+        'Received data from polling', {
+          dataLength: data.length,
+          dataPreview: data.substring(0, 100) + (data.length > 100 ? '...' : '')
+        }
+      );
       this.handleIncomingMessage(data, 'polling');
+    } else {
+      httpLogger.createLogEntry('DEBUG', 'POLLING',
+        'No data received from polling request', {
+          pendingIds
+        }
+      );
     }
   }
 
   // Handle incoming messages from any source
   handleIncomingMessage(rawData, source) {
     try {
-      console.log(`Received message via ${source}:`, rawData);
+      httpLogger.createLogEntry('INFO', 'MESSAGE_RECEIVED',
+        `Received message via ${source}`,
+        {
+          source,
+          dataLength: rawData?.length || 0,
+          dataPreview: rawData?.substring(0, 200) + (rawData?.length > 200 ? '...' : '')
+        }
+      );
 
       // Try to parse as JSON
       let messageData;
@@ -245,7 +392,10 @@ class ResponseListenerService {
 
       // Validate message structure
       if (!this.validateMessage(messageData)) {
-        console.warn('Invalid message format received:', messageData);
+        httpLogger.createLogEntry('WARN', 'MESSAGE_RECEIVED',
+          'Invalid message format received',
+          { messageData, source }
+        );
         return;
       }
 
@@ -258,7 +408,23 @@ class ResponseListenerService {
           const pending = this.pendingMessages.get(messageId);
           clearTimeout(pending.timeout);
           this.pendingMessages.delete(messageId);
+
+          httpLogger.logMessageFlow(messageId, 'RESPONSE_RECEIVED_AND_CORRELATED', {
+            source,
+            pendingRemovedCount: 1,
+            remainingPending: this.pendingMessages.size
+          });
+        } else {
+          httpLogger.createLogEntry('WARN', 'MESSAGE_RECEIVED',
+            'Received response for unknown message ID',
+            { messageId, source, currentPendingIds: Array.from(this.pendingMessages.keys()) }
+          );
         }
+      } else {
+        httpLogger.createLogEntry('WARN', 'MESSAGE_RECEIVED',
+          'Received message without correlation ID',
+          { messageData, source }
+        );
       }
 
       // Emit message received event
@@ -269,7 +435,15 @@ class ResponseListenerService {
       });
 
     } catch (error) {
-      console.error('Error handling incoming message:', error);
+      httpLogger.createLogEntry('ERROR', 'MESSAGE_RECEIVED',
+        'Error handling incoming message',
+        {
+          error: error.message,
+          stack: error.stack,
+          source,
+          rawData: rawData?.substring(0, 500)
+        }
+      );
       this.emit('error', { error, source: source });
     }
   }
@@ -307,13 +481,43 @@ class ResponseListenerService {
       this.reconnectAttempts++;
       const delay = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
-      console.log(`Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`);
+      httpLogger.createLogEntry('INFO', 'RESPONSE_LISTENER',
+        `Attempting automatic reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`,
+        {
+          pendingMessagesCount: this.pendingMessages.size,
+          source: source
+        }
+      );
 
       setTimeout(() => {
-        this.startListening();
+        // Only reconnect if there are still pending messages
+        if (this.pendingMessages.size > 0) {
+          httpLogger.createLogEntry('INFO', 'RESPONSE_LISTENER',
+            'Reconnecting because there are pending messages',
+            {
+              pendingMessagesCount: this.pendingMessages.size,
+              pendingMessageIds: Array.from(this.pendingMessages.keys())
+            }
+          );
+          this.startListening();
+        } else {
+          httpLogger.createLogEntry('WARN', 'RESPONSE_LISTENER',
+            'Skipping reconnection - no pending messages to listen for',
+            {
+              reconnectAttempt: this.reconnectAttempts
+            }
+          );
+          this.updateConnectionStatus('disconnected');
+        }
       }, delay);
     } else {
-      console.error('Max reconnection attempts reached');
+      httpLogger.createLogEntry('ERROR', 'RESPONSE_LISTENER',
+        'Max reconnection attempts reached',
+        {
+          maxAttempts: this.maxReconnectAttempts,
+          pendingMessagesCount: this.pendingMessages.size
+        }
+      );
       this.updateConnectionStatus('disconnected');
       this.emit('connectionFailed', {
         attempts: this.reconnectAttempts,
@@ -363,7 +567,27 @@ class ResponseListenerService {
 
   // Manual retry connection
   retryConnection() {
-    console.log('Manual connection retry requested');
+    httpLogger.createLogEntry('INFO', 'RESPONSE_LISTENER', 'Manual connection retry requested', {
+      pendingMessagesCount: this.pendingMessages.size,
+      pendingMessageIds: Array.from(this.pendingMessages.keys())
+    });
+
+    // Only retry if there are pending messages to listen for
+    if (this.pendingMessages.size === 0) {
+      httpLogger.createLogEntry('WARN', 'RESPONSE_LISTENER',
+        'Retry connection called but no pending messages - not starting listener to avoid unnecessary requests',
+        {
+          recommendation: 'Only retry when there are messages awaiting responses'
+        }
+      );
+
+      // Just reset the status without starting polling
+      this.updateConnectionStatus('disconnected');
+      this.reconnectAttempts = 0;
+      return;
+    }
+
+    // Only retry if there are messages pending
     this.reconnectAttempts = 0;
     this.startListening();
   }
