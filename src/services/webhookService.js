@@ -34,6 +34,29 @@ export const sendMessageToWebhook = async (message, options = {}) => {
     sessionId: options.sessionId || generateSessionId()
   });
 
+  // Add file attachment metadata if present
+  if (message.fileAttachments && message.fileAttachments.length > 0) {
+    const fileData = message.fileAttachments.map(file => ({
+      id: file.id,
+      fileName: file.file_name,
+      fileType: file.file_type,
+      fileSize: file.file_size,
+      downloadUrl: file.download_url,
+      thumbnailUrl: file.thumbnail_url
+    }));
+
+    params.append('hasFiles', 'true');
+    params.append('fileCount', message.fileAttachments.length.toString());
+    params.append('fileMetadata', JSON.stringify(fileData));
+
+    // Log file attachments being sent
+    httpLogger.logMessageFlow(messageId, 'WEBHOOK_FILES_INCLUDED', {
+      fileCount: message.fileAttachments.length,
+      fileTypes: message.fileAttachments.map(f => f.file_type),
+      totalSize: message.fileAttachments.reduce((sum, f) => sum + f.file_size, 0)
+    });
+  }
+
   const requestUrl = `${webhookUrl}?${params.toString()}`;
 
   // Start HTTP request logging

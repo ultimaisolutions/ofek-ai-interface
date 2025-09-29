@@ -102,3 +102,11 @@ This is a React + Vite application for building a real-time AI chat interface wi
 - ESLint configured with modern flat config format
 - Unused variables ignored for uppercase patterns (constants)
 - Vite configured with flexible port handling for development
+
+
+### General Guidelines
+- New features must build upon previous legacy code and be backwards compatible, unless stated otherwise.
+- You have full access to the supabase mcp server, utilize that to increase your productivity and context
+- Always investigate issues thoroughly, be meticulous and unrelenting in your investigations.
+- If you require clarifications in order to produce a better response or in order to perform your task better, always ask for them before starting to act.
+- New features must be accompanied with thorough testing, when you plan the feature plan the tests!
