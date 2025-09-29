@@ -11,7 +11,7 @@ const generateUUID = () => {
 
 // Webhook service for sending message data with response correlation
 export const sendMessageToWebhook = async (message, options = {}) => {
-  const webhookUrl = 'https://ultimaisolutions.app.n8n.cloud/webhook-test/interface-chat';
+  const webhookUrl = 'https://ultimaisolutions.app.n8n.cloud/webhook/interface-chat';
 
   // Generate unique message ID if not provided
   const messageId = message.id || generateUUID();

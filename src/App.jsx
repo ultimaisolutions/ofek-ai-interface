@@ -10,13 +10,98 @@ import fileStorageService from './services/fileStorageService'
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
-  const [messages, setMessages] = useState([
-    { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
-  ])
-  const [chatHistory, setChatHistory] = useState([
-    { id: 1, title: 'New Conversation', timestamp: new Date() }
-  ])
-  const [currentChatId, setCurrentChatId] = useState(1)
+  // Initialize chatHistory from localStorage with lazy initialization
+  const [chatHistory, setChatHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-chat-history')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        return parsed.map(chat => ({
+          ...chat,
+          timestamp: new Date(chat.timestamp)
+        }))
+      }
+    } catch (error) {
+      console.error('Error loading chat history:', error)
+    }
+
+    // Default: create first chat
+    return [{
+      id: Date.now(),
+      title: 'New Conversation',
+      timestamp: new Date()
+    }]
+  })
+
+  // Initialize allChatMessages from localStorage
+  const [allChatMessages, setAllChatMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-all-chat-messages')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        const messagesWithDates = {}
+        Object.keys(parsed).forEach(chatId => {
+          messagesWithDates[chatId] = parsed[chatId].map(msg => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+          }))
+        })
+        return messagesWithDates
+      }
+    } catch (error) {
+      console.error('Error loading all chat messages:', error)
+    }
+    return {}
+  })
+
+  // Initialize currentChatId from localStorage
+  const [currentChatId, setCurrentChatId] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-current-chat-id')
+      if (saved) {
+        return parseInt(saved)
+      }
+    } catch (error) {
+      console.error('Error loading current chat ID:', error)
+    }
+    // Default: use first chat ID from history
+    const saved = localStorage.getItem('ai-chat-history')
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (parsed.length > 0) return parsed[0].id
+    }
+    return Date.now()
+  })
+
+  // Initialize messages for current chat
+  const [messages, setMessages] = useState(() => {
+    try {
+      const savedAllMessages = localStorage.getItem('ai-all-chat-messages')
+      const savedCurrentId = localStorage.getItem('ai-current-chat-id')
+
+      if (savedAllMessages && savedCurrentId) {
+        const parsed = JSON.parse(savedAllMessages)
+        const chatId = parseInt(savedCurrentId)
+
+        if (parsed[chatId]) {
+          return parsed[chatId].map(msg => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+          }))
+        }
+      }
+    } catch (error) {
+      console.error('Error loading messages:', error)
+    }
+
+    // Default greeting for new chat
+    return [{
+      id: generateUUID(),
+      type: 'ai',
+      content: 'Hello! How can I assist you today?',
+      timestamp: new Date()
+    }]
+  })
   const [inputValue, setInputValue] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [isSending, setIsSending] = useState(false)
@@ -36,58 +121,52 @@ function App() {
   const [lastConnectionError, setLastConnectionError] = useState(null)
   const [messageStates, setMessageStates] = useState(new Map())
 
-  // Load data from localStorage on component mount
+  // Initialize default greeting for new first-time users
   useEffect(() => {
-    const savedChatHistory = localStorage.getItem('ai-chat-history')
-    const savedMessages = localStorage.getItem('ai-chat-messages')
-    const savedCurrentChatId = localStorage.getItem('ai-current-chat-id')
-
-    if (savedChatHistory) {
-      try {
-        const parsedHistory = JSON.parse(savedChatHistory)
-        // Convert timestamp strings back to Date objects
-        const historyWithDates = parsedHistory.map(chat => ({
-          ...chat,
-          timestamp: new Date(chat.timestamp)
-        }))
-        setChatHistory(historyWithDates)
-      } catch (error) {
-        console.error('Error parsing chat history:', error)
+    // Only run once on mount to ensure first chat has messages
+    if (chatHistory.length > 0 && Object.keys(allChatMessages).length === 0) {
+      const firstChatId = chatHistory[0].id
+      const defaultGreeting = {
+        id: generateUUID(),
+        type: 'ai',
+        content: 'Hello! How can I assist you today?',
+        timestamp: new Date()
       }
-    }
 
-    if (savedMessages) {
-      try {
-        const parsedMessages = JSON.parse(savedMessages)
-        // Convert timestamp strings back to Date objects
-        const messagesWithDates = parsedMessages.map(message => ({
-          ...message,
-          timestamp: new Date(message.timestamp)
-        }))
-        setMessages(messagesWithDates)
-      } catch (error) {
-        console.error('Error parsing messages:', error)
-      }
-    }
-
-    if (savedCurrentChatId) {
-      setCurrentChatId(parseInt(savedCurrentChatId))
+      setAllChatMessages({ [firstChatId]: [defaultGreeting] })
+      setMessages([defaultGreeting])
     }
   }, [])
 
   // Save chat history to localStorage whenever it changes
   useEffect(() => {
-    localStorage.setItem('ai-chat-history', JSON.stringify(chatHistory))
+    if (chatHistory.length > 0) {
+      localStorage.setItem('ai-chat-history', JSON.stringify(chatHistory))
+    }
   }, [chatHistory])
 
-  // Save messages to localStorage whenever they change
+  // Save all chat messages to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('ai-chat-messages', JSON.stringify(messages))
-  }, [messages])
+    if (Object.keys(allChatMessages).length > 0) {
+      localStorage.setItem('ai-all-chat-messages', JSON.stringify(allChatMessages))
+    }
+  }, [allChatMessages])
+
+  // Save messages to allChatMessages whenever they change (for current chat)
+  useEffect(() => {
+    if (currentChatId && messages.length > 0) {
+      setAllChatMessages(prev => ({
+        ...prev,
+        [currentChatId]: messages
+      }))
+    }
+  }, [messages, currentChatId])
 
   // Save current chat ID to localStorage whenever it changes
   useEffect(() => {
-    localStorage.setItem('ai-current-chat-id', currentChatId.toString())
+    if (currentChatId) {
+      localStorage.setItem('ai-current-chat-id', String(currentChatId))
+    }
   }, [currentChatId])
 
   // Save session ID to localStorage whenever it changes
@@ -339,6 +418,15 @@ function App() {
     setInputValue('')
     setIsSending(true)
 
+    // Auto-generate chat title from first user message (if current chat has default title)
+    const currentChat = chatHistory.find(chat => chat.id === currentChatId)
+    if (currentChat && currentChat.title === 'New Conversation' && userMessage.content) {
+      const title = userMessage.content.substring(0, 50) + (userMessage.content.length > 50 ? '...' : '')
+      setChatHistory(prev => prev.map(chat =>
+        chat.id === currentChatId ? { ...chat, title } : chat
+      ))
+    }
+
     // Upload files if any are selected
     let uploadedFiles = []
     if (selectedFiles.length > 0) {
@@ -488,9 +576,63 @@ function App() {
   }
 
   const selectChat = (chatId) => {
+    // Save current chat messages before switching
+    setAllChatMessages(prev => {
+      const updated = { ...prev, [currentChatId]: messages }
+      localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
+      return updated
+    })
+
+    // Switch to new chat
     setCurrentChatId(chatId)
-    // In a real app, you would load messages for this specific chat
-    // For now, we'll keep the current implementation
+
+    // Load messages for the selected chat
+    const chatMessages = allChatMessages[chatId]
+    if (chatMessages && chatMessages.length > 0) {
+      setMessages(chatMessages)
+    } else {
+      // New chat with default greeting
+      setMessages([
+        { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
+      ])
+    }
+
+    // Close sidebar on mobile after selecting chat
+    if (isMobile) {
+      setSidebarCollapsed(true)
+    }
+  }
+
+  const deleteChat = (chatId, event) => {
+    event.stopPropagation() // Prevent triggering selectChat
+
+    // Confirmation dialog
+    if (!confirm('Are you sure you want to delete this conversation?')) {
+      return
+    }
+
+    // Remove chat from history
+    setChatHistory(prev => prev.filter(chat => chat.id !== chatId))
+
+    // Remove messages from allChatMessages
+    setAllChatMessages(prev => {
+      const updated = { ...prev }
+      delete updated[chatId]
+      localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
+      return updated
+    })
+
+    // If deleting the current chat, switch to another chat or create new one
+    if (chatId === currentChatId) {
+      const remainingChats = chatHistory.filter(chat => chat.id !== chatId)
+      if (remainingChats.length > 0) {
+        // Switch to the most recent remaining chat
+        selectChat(remainingChats[0].id)
+      } else {
+        // Create a new chat if no chats remain
+        createNewChat()
+      }
+    }
   }
 
   // Retry connection manually
@@ -576,10 +718,21 @@ function App() {
                 className={`chat-item ${chat.id === currentChatId ? 'active' : ''}`}
                 onClick={() => selectChat(chat.id)}
               >
-                <span className="chat-title">{chat.title}</span>
-                <span className="chat-time">
-                  {chat.timestamp.toLocaleDateString()}
-                </span>
+                <div className="chat-item-content">
+                  <span className="chat-title">{chat.title}</span>
+                  <span className="chat-time">
+                    {chat.timestamp.toLocaleDateString()}
+                  </span>
+                </div>
+                <button
+                  className="delete-chat-btn"
+                  onClick={(e) => deleteChat(chat.id, e)}
+                  title="Delete conversation"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
               </div>
             ))}
           </div>
