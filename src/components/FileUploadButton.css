@@ -1,0 +1,69 @@
+/* Compact File Upload Button */
+.file-upload-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-upload-button.drag-over::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(59, 130, 246, 0.1);
+  border: 2px dashed var(--accent-blue);
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.file-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--tertiary-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.file-button:hover:not(:disabled) {
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px);
+  border-color: var(--accent-blue);
+  transform: translateY(-1px);
+}
+
+.file-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.file-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--primary-bg);
+}
+
+.file-upload-button.drag-over .file-button {
+  background: var(--accent-blue);
+  color: white;
+  border-color: var(--accent-blue);
+  transform: scale(1.05);
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .file-button {
+    width: 36px;
+    height: 36px;
+    font-size: 1.1rem;
+  }
+}
