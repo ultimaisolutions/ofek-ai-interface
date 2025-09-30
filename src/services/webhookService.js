@@ -9,8 +9,8 @@ const generateUUID = () => {
   });
 };
 
-// Export test connection URL
-export const testConnectionUrl = 'https://ultimaisolutions.app.n8n.cloud/healthz';
+// Export test connection URL from environment variable
+export const testConnectionUrl = import.meta.env.VITE_N8N_HEALTH_CHECK_URL;
 
 // Test n8n instance connection
 export const testN8nConnection = async () => {
@@ -76,7 +76,7 @@ export const testN8nConnection = async () => {
 
 // Webhook service for sending message data with response correlation
 export const sendMessageToWebhook = async (message, options = {}) => {
-  const webhookUrl = 'https://ultimaisolutions.app.n8n.cloud/webhook/interface-chat';
+  const webhookUrl = import.meta.env.VITE_N8N_WEBHOOK_URL;
 
   // Generate unique message ID if not provided
   const messageId = message.id || generateUUID();

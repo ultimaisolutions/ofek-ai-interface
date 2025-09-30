@@ -127,7 +127,7 @@ function AuthPage({ onAuthSuccess }) {
         <div className="auth-card">
           {/* Logo/Title */}
           <div className="auth-header">
-            <h1 className="auth-logo">Ultim AI</h1>
+            <h1 className="auth-logo">Ultim AI Solutions</h1>
             <p className="auth-subtitle">
               {isLogin ? 'Welcome back' : 'Create your account'}
             </p>
