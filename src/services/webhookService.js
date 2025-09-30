@@ -9,6 +9,71 @@ const generateUUID = () => {
   });
 };
 
+// Export test connection URL
+export const testConnectionUrl = 'https://ultimaisolutions.app.n8n.cloud/healthz';
+
+// Test n8n instance connection
+export const testN8nConnection = async () => {
+  httpLogger.createLogEntry('INFO', 'CONNECTION_TEST',
+    'Testing n8n instance connection',
+    { endpoint: testConnectionUrl }
+  );
+
+  const requestLogger = httpLogger.logHttpRequest('GET', testConnectionUrl, {
+    purpose: 'health_check'
+  });
+
+  try {
+    // Use 'no-cors' mode to bypass CORS restrictions
+    // For health checks, we only need to know if the endpoint responds
+    // We don't need to read response data or check status codes
+    const response = await fetch(testConnectionUrl, {
+      method: 'GET',
+      mode: 'no-cors', // Bypasses CORS - request succeeds if endpoint is reachable
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    });
+
+    // With 'no-cors' mode, we can't read status or body, but if fetch succeeds,
+    // it means the endpoint is reachable and responding
+    requestLogger.logResponse(response, 'Health check passed - endpoint reachable');
+
+    httpLogger.createLogEntry('INFO', 'CONNECTION_TEST',
+      'n8n instance health check succeeded',
+      {
+        endpoint: testConnectionUrl,
+        note: 'Connection successful (no-cors mode)'
+      }
+    );
+
+    return {
+      success: true,
+      status: 'connected',
+      timestamp: new Date()
+    };
+
+  } catch (error) {
+    requestLogger.logResponse(null, null, error);
+
+    httpLogger.createLogEntry('ERROR', 'CONNECTION_TEST',
+      'n8n instance health check exception',
+      {
+        error: error.message,
+        stack: error.stack,
+        endpoint: testConnectionUrl
+      }
+    );
+
+    return {
+      success: false,
+      status: 'error',
+      error: error.name === 'TimeoutError'
+        ? 'Connection timeout - n8n instance may be unreachable'
+        : `Connection error: ${error.message}`,
+      timestamp: new Date()
+    };
+  }
+};
+
 // Webhook service for sending message data with response correlation
 export const sendMessageToWebhook = async (message, options = {}) => {
   const webhookUrl = 'https://ultimaisolutions.app.n8n.cloud/webhook/interface-chat';

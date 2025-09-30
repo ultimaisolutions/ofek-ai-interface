@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-import { sendMessageToWebhookWithRetry, generateUUID } from './services/webhookService'
+import { sendMessageToWebhookWithRetry, generateUUID, testN8nConnection } from './services/webhookService'
 import responseListenerService from './services/responseListenerService'
 import httpLogger from './services/httpLoggerService'
 import { sanitizeUserInput } from './services/inputSanitizationService'
@@ -132,6 +132,11 @@ function App() {
   const [pendingResponseCount, setPendingResponseCount] = useState(0)
   const [lastConnectionError, setLastConnectionError] = useState(null)
   const [messageStates, setMessageStates] = useState(new Map())
+
+  // n8n instance connection states
+  const [n8nConnectionStatus, setN8nConnectionStatus] = useState('disconnected') // 'disconnected' | 'testing' | 'connected' | 'error'
+  const [n8nLastTestTime, setN8nLastTestTime] = useState(null)
+  const [n8nConnectionError, setN8nConnectionError] = useState(null)
 
   // Initialize default greeting for new first-time users
   useEffect(() => {
@@ -683,6 +688,30 @@ function App() {
     responseListenerService.retryConnection()
   }
 
+  // Test n8n instance connection
+  const handleTestN8nConnection = async () => {
+    setN8nConnectionStatus('testing')
+    setN8nConnectionError(null)
+
+    try {
+      const result = await testN8nConnection()
+
+      if (result.success) {
+        setN8nConnectionStatus('connected')
+        setN8nLastTestTime(result.timestamp)
+        setN8nConnectionError(null)
+      } else {
+        setN8nConnectionStatus('error')
+        setN8nLastTestTime(result.timestamp)
+        setN8nConnectionError(result.error)
+      }
+    } catch (error) {
+      setN8nConnectionStatus('error')
+      setN8nLastTestTime(new Date())
+      setN8nConnectionError(`Unexpected error: ${error.message}`)
+    }
+  }
+
   // Get connection status display info
   const getConnectionStatusInfo = () => {
     switch (connectionStatus) {
@@ -695,6 +724,21 @@ function App() {
       case 'disconnected':
       default:
         return { text: 'Disconnected', color: 'gray', icon: '○' }
+    }
+  }
+
+  // Get n8n connection status display info
+  const getN8nConnectionStatusInfo = () => {
+    switch (n8nConnectionStatus) {
+      case 'connected':
+        return { text: 'server: connected', color: 'green', icon: '●' }
+      case 'testing':
+        return { text: 'server: testing...', color: 'orange', icon: '○' }
+      case 'error':
+        return { text: 'server: error', color: 'red', icon: '●' }
+      case 'disconnected':
+      default:
+        return { text: 'server: not tested', color: 'gray', icon: '○' }
     }
   }
 
@@ -785,21 +829,38 @@ function App() {
         {/* Connection Status Bar */}
         <div className="connection-status-bar">
           <div className="connection-info">
-            <span
-              className="connection-indicator"
-              style={{ color: getConnectionStatusInfo().color }}
-            >
-              {getConnectionStatusInfo().icon}
-            </span>
-            <span className="connection-text">
-              {getConnectionStatusInfo().text}
-            </span>
-            {pendingResponseCount > 0 && (
-              <span className="pending-count">
-                • Waiting for {pendingResponseCount} response{pendingResponseCount !== 1 ? 's' : ''}
+            {/* n8n Instance Connection Status */}
+            <div className="n8n-connection-status">
+              <span
+                className="connection-indicator"
+                style={{ color: getN8nConnectionStatusInfo().color }}
+              >
+                {getN8nConnectionStatusInfo().icon}
               </span>
-            )}
+              <span className="connection-text">
+                {getN8nConnectionStatusInfo().text}
+              </span>
+              {n8nLastTestTime && (
+                <span className="last-test-time" title={n8nLastTestTime.toLocaleString()}>
+                  (tested {n8nLastTestTime.toLocaleTimeString()})
+                </span>
+              )}
+            </div>
           </div>
+
+          {/* n8n Connection Error */}
+          {n8nConnectionError && (
+            <div className="connection-error">
+              <span className="error-message">{n8nConnectionError}</span>
+              <button
+                className="retry-btn"
+                onClick={handleTestN8nConnection}
+                disabled={n8nConnectionStatus === 'testing'}
+              >
+                Retry
+              </button>
+            </div>
+          )}
 
           {lastConnectionError && (
             <div className="connection-error">
@@ -818,10 +879,10 @@ function App() {
             <div className="connection-controls">
               <button
                 className="test-connection-btn"
-                onClick={retryConnection}
-                disabled={connectionStatus === 'connecting'}
+                onClick={handleTestN8nConnection}
+                disabled={n8nConnectionStatus === 'testing'}
               >
-                Test Connection
+                {n8nConnectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
               </button>
             </div>
           )}
