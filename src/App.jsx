@@ -7,8 +7,27 @@ import { sanitizeUserInput } from './services/inputSanitizationService'
 import FileUploadButton from './components/FileUploadButton'
 import fileStorageService from './services/fileStorageService'
 import MarkdownMessage from './components/MarkdownMessage'
+import AuthPage from './pages/AuthPage'
+import authService from './services/authService'
 
 function App() {
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [currentUser, setCurrentUser] = useState(null)
+
+  // Check authentication status on mount
+  useEffect(() => {
+    const checkAuth = () => {
+      if (authService.isAuthenticated()) {
+        const user = authService.getCurrentUser()
+        if (user) {
+          setIsAuthenticated(true)
+          setCurrentUser(user)
+        }
+      }
+    }
+    checkAuth()
+  }, [])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
   // Initialize chatHistory from localStorage with lazy initialization
@@ -765,6 +784,23 @@ function App() {
     }
   }
 
+  // Authentication handlers
+  const handleAuthSuccess = (user) => {
+    setIsAuthenticated(true)
+    setCurrentUser(user)
+  }
+
+  const handleLogout = () => {
+    authService.logout()
+    setIsAuthenticated(false)
+    setCurrentUser(null)
+  }
+
+  // Show auth page if not authenticated
+  if (!isAuthenticated) {
+    return <AuthPage onAuthSuccess={handleAuthSuccess} />
+  }
+
   return (
     <div className="app">
       {/* Mobile overlay */}
@@ -821,6 +857,26 @@ function App() {
                 </button>
               </div>
             ))}
+          </div>
+        )}
+        {!sidebarCollapsed && (
+          <div className="sidebar-footer">
+            <div className="user-info">
+              <div className="user-avatar">
+                {currentUser?.username?.charAt(0)?.toUpperCase() || currentUser?.email?.charAt(0)?.toUpperCase() || 'U'}
+              </div>
+              <div className="user-details">
+                <div className="user-name">{currentUser?.username || 'User'}</div>
+                <div className="user-email">{currentUser?.email || ''}</div>
+              </div>
+            </div>
+            <button className="logout-btn" onClick={handleLogout} title="Logout">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M16 17l5-5-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M21 12H9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
           </div>
         )}
       </div>
