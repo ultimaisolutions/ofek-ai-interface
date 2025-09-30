@@ -6,6 +6,7 @@ import httpLogger from './services/httpLoggerService'
 import { sanitizeUserInput } from './services/inputSanitizationService'
 import FileUploadButton from './components/FileUploadButton'
 import fileStorageService from './services/fileStorageService'
+import MarkdownMessage from './components/MarkdownMessage'
 
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
@@ -832,7 +833,7 @@ function App() {
             return (
               <div key={message.id} className={`message ${message.type} ${message.isError ? 'error' : ''}`}>
                 <div className="message-content">
-                  {message.content}
+                  <MarkdownMessage content={message.content} />
 
                   {/* File Attachments */}
                   {message.fileAttachments && message.fileAttachments.length > 0 && (
@@ -888,7 +889,7 @@ function App() {
                 </div>
                 {message.correlationId && (
                   <div className="message-correlation" title={`Correlation ID: ${message.correlationId}`}>
-                    🔗
+                    
                   </div>
                 )}
               </div>

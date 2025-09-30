@@ -525,13 +525,11 @@
 /* Chat Window */
 .chat-window {
   flex: 1;
-  padding: 2rem;
+  padding: 2rem clamp(1rem, 5vw, 3rem);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  max-width: 800px;
-  margin: 0 auto;
   width: 100%;
 }
 
@@ -556,7 +554,7 @@
 .message {
   display: flex;
   gap: 12px;
-  max-width: 85%;
+  max-width: min(85%, 700px);
   animation: fadeInUp 0.3s ease-out;
 }
 
@@ -594,14 +592,13 @@
 
 /* Chat Input */
 .chat-input-container {
-  padding: 1.5rem 2rem 2rem;
+  padding: 1.5rem clamp(1rem, 5vw, 3rem) 2rem;
   background: linear-gradient(to top, var(--primary-bg) 0%, transparent 100%);
   backdrop-filter: blur(12px);
 }
 
 .chat-input {
-  max-width: 800px;
-  margin: 0 auto;
+  width: 100%;
   background: var(--glass-bg);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-color);
@@ -719,9 +716,7 @@
 
 /* Responsive Design */
 @media (max-width: 1024px) {
-  .chat-window {
-    max-width: 700px;
-  }
+  /* Flexbox handles sizing automatically */
 }
 
 @media (max-width: 768px) {
