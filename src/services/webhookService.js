@@ -22,6 +22,11 @@ export const sendMessageToWebhook = async (message, options = {}) => {
     options
   });
 
+  // Validate that session ID is provided
+  if (!options.sessionId) {
+    throw new Error('Session ID is required but was not provided')
+  }
+
   // Prepare query parameters with response correlation
   const params = new URLSearchParams({
     messageType: message.type || 'text',
@@ -31,7 +36,7 @@ export const sendMessageToWebhook = async (message, options = {}) => {
     expectResponse: options.expectResponse !== false ? 'true' : 'false',
     responseFormat: options.responseFormat || 'json',
     userId: options.userId || 'anonymous',
-    sessionId: options.sessionId || generateSessionId()
+    sessionId: options.sessionId
   });
 
   // Add file attachment metadata if present
@@ -151,18 +156,6 @@ export const sendMessageToWebhook = async (message, options = {}) => {
       correlationId: requestLogger.correlationId
     };
   }
-};
-
-// Generate session ID for tracking conversation context
-const generateSessionId = () => {
-  const sessionId = sessionStorage.getItem('ai-chat-session-id');
-  if (sessionId) {
-    return sessionId;
-  }
-
-  const newSessionId = generateUUID();
-  sessionStorage.setItem('ai-chat-session-id', newSessionId);
-  return newSessionId;
 };
 
 // Retry logic with exponential backoff

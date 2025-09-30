@@ -110,9 +110,20 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([])
   const [fileUploadErrors, setFileUploadErrors] = useState([])
   const [uploadingFiles, setUploadingFiles] = useState(new Map())
-  const [sessionId] = useState(() => {
-    const saved = localStorage.getItem('ai-chat-session-id')
-    return saved || fileStorageService.generateSessionId()
+
+  // Session ID management - each conversation has its own session ID
+  const [chatSessionIds, setChatSessionIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-chat-session-ids')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        // Convert object back to Map
+        return new Map(Object.entries(parsed))
+      }
+    } catch (error) {
+      console.error('Error loading chat session IDs:', error)
+    }
+    return new Map()
   })
 
   // Response listener states
@@ -169,10 +180,26 @@ function App() {
     }
   }, [currentChatId])
 
-  // Save session ID to localStorage whenever it changes
+  // Save chat session IDs to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('ai-chat-session-id', sessionId)
-  }, [sessionId])
+    if (chatSessionIds.size > 0) {
+      // Convert Map to object for JSON serialization
+      const sessionIdsObj = Object.fromEntries(chatSessionIds)
+      localStorage.setItem('ai-chat-session-ids', JSON.stringify(sessionIdsObj))
+    }
+  }, [chatSessionIds])
+
+  // Helper function to get or create session ID for a conversation
+  const getOrCreateSessionId = (chatId) => {
+    if (chatSessionIds.has(chatId)) {
+      return chatSessionIds.get(chatId)
+    }
+
+    // Generate new session ID for this conversation
+    const newSessionId = `session_${chatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    setChatSessionIds(prev => new Map(prev).set(chatId, newSessionId))
+    return newSessionId
+  }
 
   // Handle window resize
   useEffect(() => {
@@ -358,6 +385,9 @@ function App() {
   const uploadFiles = async (messageId) => {
     if (selectedFiles.length === 0) return []
 
+    // Get the session ID for the current conversation
+    const conversationSessionId = getOrCreateSessionId(currentChatId)
+
     const uploadPromises = selectedFiles.map(async (fileItem) => {
       try {
         setUploadingFiles(prev => new Map(prev).set(fileItem.id, { status: 'uploading', progress: 0 }))
@@ -365,7 +395,7 @@ function App() {
         const result = await fileStorageService.uploadFile(
           fileItem.file,
           messageId,
-          sessionId,
+          conversationSessionId,
           (progress, message) => {
             setUploadingFiles(prev => new Map(prev).set(fileItem.id, {
               status: 'uploading',
@@ -466,11 +496,14 @@ function App() {
 
     // Send message to webhook with response correlation
     try {
+      // Get the session ID for the current conversation
+      const conversationSessionId = getOrCreateSessionId(currentChatId)
+
       const webhookOptions = {
         expectResponse: true,
         responseFormat: 'json',
         userId: 'anonymous',
-        sessionId: null // Will be auto-generated
+        sessionId: conversationSessionId
       }
 
       const webhookResult = await sendMessageToWebhookWithRetry(userMessage, webhookOptions);
@@ -568,6 +601,11 @@ function App() {
       title: 'New Conversation',
       timestamp: new Date()
     }
+
+    // Generate session ID for this new conversation
+    const newSessionId = `session_${newChatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    setChatSessionIds(prev => new Map(prev).set(newChatId, newSessionId))
+
     setChatHistory(prev => [newChat, ...prev])
     setCurrentChatId(newChatId)
     setMessages([
@@ -585,6 +623,9 @@ function App() {
 
     // Switch to new chat
     setCurrentChatId(chatId)
+
+    // Ensure session ID exists for this conversation (creates one if it doesn't exist)
+    getOrCreateSessionId(chatId)
 
     // Load messages for the selected chat
     const chatMessages = allChatMessages[chatId]

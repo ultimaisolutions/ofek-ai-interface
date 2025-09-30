@@ -384,10 +384,6 @@ class FileStorageService {
     }
   }
 
-  generateSessionId() {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  }
-
   getProgressCallback(fileId) {
     return this.progressCallbacks.get(fileId)
   }
