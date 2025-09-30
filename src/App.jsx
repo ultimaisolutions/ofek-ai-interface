@@ -9,17 +9,19 @@ import fileStorageService from './services/fileStorageService'
 import MarkdownMessage from './components/MarkdownMessage'
 import AuthPage from './pages/AuthPage'
 import authService from './services/authService'
+import supabase from './lib/supabaseClient'
 
 function App() {
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [currentUser, setCurrentUser] = useState(null)
 
-  // Check authentication status on mount
+  // Check authentication status on mount and listen for auth changes
   useEffect(() => {
-    const checkAuth = () => {
-      if (authService.isAuthenticated()) {
-        const user = authService.getCurrentUser()
+    const checkAuth = async () => {
+      const isAuth = await authService.isAuthenticated()
+      if (isAuth) {
+        const user = await authService.getCurrentUser()
         if (user) {
           setIsAuthenticated(true)
           setCurrentUser(user)
@@ -27,6 +29,33 @@ function App() {
       }
     }
     checkAuth()
+
+    // Listen for auth state changes from Supabase
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('Auth state changed:', event, session)
+
+      if (event === 'SIGNED_IN' && session) {
+        const user = await authService.getCurrentUser()
+        if (user) {
+          setIsAuthenticated(true)
+          setCurrentUser(user)
+        }
+      } else if (event === 'SIGNED_OUT') {
+        setIsAuthenticated(false)
+        setCurrentUser(null)
+      } else if (event === 'TOKEN_REFRESHED' && session) {
+        // Update user token
+        const user = await authService.getCurrentUser()
+        if (user) {
+          setCurrentUser(user)
+        }
+      }
+    })
+
+    // Cleanup subscription on unmount
+    return () => {
+      subscription.unsubscribe()
+    }
   }, [])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 768)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
@@ -790,8 +819,8 @@ function App() {
     setCurrentUser(user)
   }
 
-  const handleLogout = () => {
-    authService.logout()
+  const handleLogout = async () => {
+    await authService.logout()
     setIsAuthenticated(false)
     setCurrentUser(null)
   }

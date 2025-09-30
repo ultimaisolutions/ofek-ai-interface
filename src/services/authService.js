@@ -1,80 +1,140 @@
 /**
  * Authentication Service
- * Handles user authentication, login, logout, and session management
+ * Handles user authentication, login, logout, and session management using Supabase Auth
  */
 
-// ============================================================================
-// TEMPORARY WORKAROUND: Hard-coded credentials
-// TODO: Replace with proper user database and authentication API
-// This is a temporary solution for development/testing purposes only
-// ============================================================================
-const TEMP_HARDCODED_USER = {
-  email: 'ofekloya@ultimaisolutions.com',
-  password: '123456',
-  username: 'Ofek Loya'
-}
-// ============================================================================
+import supabase from '../lib/supabaseClient'
 
 /**
- * Validates login credentials against hard-coded user
+ * Validates login credentials with Supabase Auth
  * @param {string} email - User email
  * @param {string} password - User password
- * @param {boolean} rememberMe - Whether to persist login
+ * @param {boolean} rememberMe - Whether to persist login (not used, Supabase handles persistence)
  * @returns {Promise<{success: boolean, user?: object, error?: string}>}
  */
 export const login = async (email, password, rememberMe = false) => {
-  // Simulate API delay
-  await new Promise(resolve => setTimeout(resolve, 800))
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    })
 
-  // Validate against hard-coded credentials
-  if (email === TEMP_HARDCODED_USER.email && password === TEMP_HARDCODED_USER.password) {
-    const user = {
-      email: TEMP_HARDCODED_USER.email,
-      username: TEMP_HARDCODED_USER.username,
-      token: 'temp-jwt-token-' + Date.now(),
-      loginTime: new Date().toISOString()
+    if (error) {
+      return {
+        success: false,
+        error: error.message || 'Invalid email or password'
+      }
     }
 
-    // Store auth data
-    const storage = rememberMe ? localStorage : sessionStorage
-    storage.setItem('auth-token', user.token)
-    storage.setItem('auth-user', JSON.stringify(user))
+    if (data.user) {
+      // Fetch profile data to get username
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('username, avatar_url')
+        .eq('id', data.user.id)
+        .single()
+
+      const user = {
+        id: data.user.id,
+        email: data.user.email,
+        username: profile?.username || data.user.email.split('@')[0],
+        avatar_url: profile?.avatar_url,
+        token: data.session?.access_token,
+        loginTime: new Date().toISOString()
+      }
+
+      // Store user data in localStorage (Supabase handles session automatically)
+      localStorage.setItem('auth-user', JSON.stringify(user))
+
+      return {
+        success: true,
+        user
+      }
+    }
 
     return {
-      success: true,
-      user
+      success: false,
+      error: 'Login failed. Please try again.'
     }
-  }
-
-  return {
-    success: false,
-    error: 'Invalid email or password'
+  } catch (error) {
+    console.error('Login error:', error)
+    return {
+      success: false,
+      error: error.message || 'An unexpected error occurred'
+    }
   }
 }
 
 /**
- * Registers a new user
+ * Registers a new user with Supabase Auth
  * @param {string} email - User email
  * @param {string} username - Username
  * @param {string} password - User password
  * @returns {Promise<{success: boolean, user?: object, error?: string}>}
  */
 export const register = async (email, username, password) => {
-  // Simulate API delay
-  await new Promise(resolve => setTimeout(resolve, 800))
+  try {
+    // Sign up with Supabase Auth and include username in metadata
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          username: username
+        }
+      }
+    })
 
-  // For now, registration is disabled - only the hard-coded user can login
-  return {
-    success: false,
-    error: 'Registration is currently disabled. Please contact an administrator.'
+    if (error) {
+      return {
+        success: false,
+        error: error.message || 'Registration failed'
+      }
+    }
+
+    if (data.user) {
+      // The profile will be auto-created by the database trigger
+      const user = {
+        id: data.user.id,
+        email: data.user.email,
+        username: username,
+        token: data.session?.access_token,
+        loginTime: new Date().toISOString()
+      }
+
+      // Store user data in localStorage
+      localStorage.setItem('auth-user', JSON.stringify(user))
+
+      return {
+        success: true,
+        user
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Registration failed. Please try again.'
+    }
+  } catch (error) {
+    console.error('Registration error:', error)
+    return {
+      success: false,
+      error: error.message || 'An unexpected error occurred'
+    }
   }
 }
 
 /**
  * Logs out the current user and clears all auth data
  */
-export const logout = () => {
-  // Clear from both storage types
+export const logout = async () => {
+  try {
+    await supabase.auth.signOut()
+  } catch (error) {
+    console.error('Logout error:', error)
+  }
+
+  // Clear local storage
   localStorage.removeItem('auth-token')
   localStorage.removeItem('auth-user')
   sessionStorage.removeItem('auth-token')
@@ -83,35 +143,68 @@ export const logout = () => {
 
 /**
  * Checks if user is currently authenticated
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-export const isAuthenticated = () => {
-  const token = localStorage.getItem('auth-token') || sessionStorage.getItem('auth-token')
-  return !!token
-}
-
-/**
- * Gets the current authenticated user
- * @returns {object|null} User object or null if not authenticated
- */
-export const getCurrentUser = () => {
+export const isAuthenticated = async () => {
   try {
-    const userStr = localStorage.getItem('auth-user') || sessionStorage.getItem('auth-user')
-    if (userStr) {
-      return JSON.parse(userStr)
-    }
+    const { data: { session } } = await supabase.auth.getSession()
+    return !!session
   } catch (error) {
-    console.error('Error parsing user data:', error)
+    console.error('Auth check error:', error)
+    return false
   }
-  return null
 }
 
 /**
- * Gets the current auth token
- * @returns {string|null}
+ * Gets the current authenticated user from Supabase session
+ * @returns {Promise<object|null>} User object or null if not authenticated
  */
-export const getAuthToken = () => {
-  return localStorage.getItem('auth-token') || sessionStorage.getItem('auth-token')
+export const getCurrentUser = async () => {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+
+    if (!session?.user) {
+      return null
+    }
+
+    // Fetch profile data
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('username, avatar_url')
+      .eq('id', session.user.id)
+      .single()
+
+    const user = {
+      id: session.user.id,
+      email: session.user.email,
+      username: profile?.username || session.user.email.split('@')[0],
+      avatar_url: profile?.avatar_url,
+      token: session.access_token,
+      loginTime: new Date(session.user.created_at).toISOString()
+    }
+
+    // Update localStorage
+    localStorage.setItem('auth-user', JSON.stringify(user))
+
+    return user
+  } catch (error) {
+    console.error('Error getting current user:', error)
+    return null
+  }
+}
+
+/**
+ * Gets the current auth token from Supabase session
+ * @returns {Promise<string|null>}
+ */
+export const getAuthToken = async () => {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token || null
+  } catch (error) {
+    console.error('Error getting auth token:', error)
+    return null
+  }
 }
 
 export default {
