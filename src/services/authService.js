@@ -161,18 +161,47 @@ export const isAuthenticated = async () => {
  */
 export const getCurrentUser = async () => {
   try {
-    const { data: { session } } = await supabase.auth.getSession()
+    console.log('[AuthService] getCurrentUser called')
+    console.log('[AuthService] About to call supabase.auth.getSession()...')
+
+    // Add timeout for getSession call
+    const sessionPromise = supabase.auth.getSession()
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('getSession timeout after 5 seconds')), 5000)
+    )
+
+    const { data: { session } } = await Promise.race([sessionPromise, timeoutPromise])
+    console.log('[AuthService] Session fetched:', session ? 'exists' : 'null')
 
     if (!session?.user) {
+      console.log('[AuthService] No session user, returning null')
       return null
     }
 
-    // Fetch profile data
-    const { data: profile } = await supabase
+    console.log('[AuthService] Fetching profile for user:', session.user.id)
+
+    // Fetch profile data with timeout to prevent hanging
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      console.warn('[AuthService] Profile query timeout after 5 seconds, aborting...')
+      controller.abort()
+    }, 5000) // 5 second timeout
+
+    const { data: profile, error } = await supabase
       .from('profiles')
       .select('username, avatar_url')
       .eq('id', session.user.id)
+      .abortSignal(controller.signal)
       .single()
+
+    clearTimeout(timeoutId)
+
+    if (error) {
+      console.error('[AuthService] Error fetching profile:', error)
+      console.log('[AuthService] Continuing with fallback username from email')
+    } else {
+      console.log('[AuthService] Profile fetched successfully:', profile)
+    }
 
     const user = {
       id: session.user.id,
@@ -183,12 +212,17 @@ export const getCurrentUser = async () => {
       loginTime: new Date(session.user.created_at).toISOString()
     }
 
+    console.log('[AuthService] User object created:', { id: user.id, username: user.username })
+
     // Update localStorage
     localStorage.setItem('auth-user', JSON.stringify(user))
+    console.log('[AuthService] User saved to localStorage')
 
     return user
   } catch (error) {
-    console.error('Error getting current user:', error)
+    console.error('[AuthService] Error getting current user:', error)
+    console.error('[AuthService] Error name:', error.name)
+    console.error('[AuthService] Error message:', error.message)
     return null
   }
 }

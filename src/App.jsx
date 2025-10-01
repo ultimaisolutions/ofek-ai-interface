@@ -10,43 +10,137 @@ import MarkdownMessage from './components/MarkdownMessage'
 import AuthPage from './pages/AuthPage'
 import authService from './services/authService'
 import supabase from './lib/supabaseClient'
+import conversationStorageService from './services/conversationStorageService'
 
 function App() {
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [currentUser, setCurrentUser] = useState(null)
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false)
+  const [showMigrationPrompt, setShowMigrationPrompt] = useState(false)
+
+  // Track Supabase IDs for each local chat ID
+  const [chatSupabaseIds, setChatSupabaseIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-chat-supabase-ids')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        return new Map(Object.entries(parsed))
+      }
+    } catch (error) {
+      console.error('Error loading chat Supabase IDs:', error)
+    }
+    return new Map()
+  })
 
   // Check authentication status on mount and listen for auth changes
   useEffect(() => {
     const checkAuth = async () => {
+      console.log('[Auth] Checking authentication on mount...')
       const isAuth = await authService.isAuthenticated()
+      console.log('[Auth] Is authenticated:', isAuth)
+
       if (isAuth) {
+        console.log('[Auth] User is already logged in, fetching user data...')
         const user = await authService.getCurrentUser()
         if (user) {
+          console.log('[Auth] Got user:', user.id)
           setIsAuthenticated(true)
           setCurrentUser(user)
+          // Load conversations from Supabase on mount if authenticated
+          try {
+            console.log('[Auth] Loading conversations on mount...')
+            await loadConversationsFromSupabase(user.id)
+            console.log('[Auth] Initial load complete')
+          } catch (error) {
+            console.error('[Auth] Error loading conversations on mount:', error)
+            setIsLoadingConversations(false)
+          }
         }
+      } else {
+        console.log('[Auth] User not authenticated, showing login page')
       }
     }
     checkAuth()
 
     // Listen for auth state changes from Supabase
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log('Auth state changed:', event, session)
+      console.log('[Auth] Event type:', event)
+      console.log('[Auth] Session:', session ? 'exists' : 'null')
 
       if (event === 'SIGNED_IN' && session) {
-        const user = await authService.getCurrentUser()
-        if (user) {
+        console.log('[Auth] SIGNED_IN event detected')
+        console.log('[Auth] Session available in event:', session.user ? 'yes' : 'no')
+
+        try {
+          // Build user object directly from session data (no blocking profile query)
+          console.log('[Auth] Building user object from session data...')
+
+          const user = {
+            id: session.user.id,
+            email: session.user.email,
+            username: session.user.email.split('@')[0], // Fallback username from email
+            avatar_url: null,
+            token: session.access_token,
+            loginTime: new Date().toISOString()
+          }
+
+          console.log('[Auth] User object created (without profile):', user.id)
+          console.log('[Auth] Setting authentication state...')
           setIsAuthenticated(true)
           setCurrentUser(user)
+          console.log('[Auth] Authentication state set successfully')
+
+          // Fetch profile in background (non-blocking) after authentication completes
+          console.log('[Auth] Scheduling background profile fetch...')
+          setTimeout(async () => {
+            try {
+              console.log('[Auth] Fetching profile in background for:', session.user.id)
+              const { data: profile, error } = await supabase
+                .from('profiles')
+                .select('username, avatar_url')
+                .eq('id', session.user.id)
+                .single()
+
+              if (error) {
+                console.log('[Auth] Background profile fetch failed (non-critical):', error.message)
+              } else if (profile?.username) {
+                console.log('[Auth] Profile loaded successfully, updating username to:', profile.username)
+                setCurrentUser(prev => ({
+                  ...prev,
+                  username: profile.username,
+                  avatar_url: profile.avatar_url
+                }))
+              }
+            } catch (error) {
+              console.log('[Auth] Background profile fetch error (non-critical):', error.message)
+            }
+          }, 100) // Wait 100ms after authentication completes
+
+          // Load conversations in background (non-blocking)
+          console.log('[Auth] Scheduling conversation loading in background...')
+          setTimeout(() => {
+            loadConversationsFromSupabase(user.id).catch(error => {
+              console.error('[Auth] Background conversation loading failed:', error)
+              setIsLoadingConversations(false)
+            })
+          }, 200)  // Small delay to let auth settle
+          console.log('[Auth] Auth flow complete, proceeding to show UI')
+        } catch (error) {
+          console.error('[Auth] Error during SIGNED_IN handling:', error)
+          // Don't block login if conversation loading fails
+          setIsLoadingConversations(false)
         }
       } else if (event === 'SIGNED_OUT') {
+        console.log('[Auth] SIGNED_OUT event detected')
         setIsAuthenticated(false)
         setCurrentUser(null)
       } else if (event === 'TOKEN_REFRESHED' && session) {
+        console.log('[Auth] TOKEN_REFRESHED event detected')
         // Update user token
         const user = await authService.getCurrentUser()
         if (user) {
+          console.log('[Auth] Updated user token')
           setCurrentUser(user)
         }
       }
@@ -224,6 +318,13 @@ function App() {
         ...prev,
         [currentChatId]: messages
       }))
+
+      // Debounced save to Supabase after messages change
+      const saveTimer = setTimeout(() => {
+        saveCurrentConversationToSupabase(currentChatId)
+      }, 1000) // Wait 1 second after last change
+
+      return () => clearTimeout(saveTimer)
     }
   }, [messages, currentChatId])
 
@@ -243,6 +344,14 @@ function App() {
     }
   }, [chatSessionIds])
 
+  // Save chat Supabase IDs to localStorage whenever they change
+  useEffect(() => {
+    if (chatSupabaseIds.size > 0) {
+      const supabaseIdsObj = Object.fromEntries(chatSupabaseIds)
+      localStorage.setItem('ai-chat-supabase-ids', JSON.stringify(supabaseIdsObj))
+    }
+  }, [chatSupabaseIds])
+
   // Helper function to get or create session ID for a conversation
   const getOrCreateSessionId = (chatId) => {
     if (chatSessionIds.has(chatId)) {
@@ -253,6 +362,184 @@ function App() {
     const newSessionId = `session_${chatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
     setChatSessionIds(prev => new Map(prev).set(chatId, newSessionId))
     return newSessionId
+  }
+
+  // Load conversations from Supabase on login
+  const loadConversationsFromSupabase = async (userId) => {
+    console.log('[LoadConversations] Starting to load conversations for userId:', userId)
+    setIsLoadingConversations(true)
+
+    // Add timeout safety net - clear loading after max 10 seconds
+    const loadingTimeoutId = setTimeout(() => {
+      console.warn('[LoadConversations] Loading timeout after 10 seconds, clearing overlay')
+      setIsLoadingConversations(false)
+    }, 10000)
+
+    try {
+      console.log('[LoadConversations] Fetching recent conversations from Supabase...')
+      const result = await conversationStorageService.getRecentConversations(userId, 20, 0)
+      clearTimeout(loadingTimeoutId)  // Clear timeout if completed successfully
+
+      console.log('[LoadConversations] Fetch result:', result)
+
+      if (result.success && result.conversations.length > 0) {
+        console.log('[LoadConversations] Found', result.conversations.length, 'conversations')
+        // Convert Supabase conversations to local format
+        const loadedChatHistory = []
+        const loadedAllMessages = {}
+        const loadedSessionIds = new Map()
+        const loadedSupabaseIds = new Map()
+
+        result.conversations.forEach(conv => {
+          // Use created_at timestamp as local chat ID for uniqueness
+          const localChatId = new Date(conv.created_at).getTime()
+
+          loadedChatHistory.push({
+            id: localChatId,
+            title: conv.title,
+            timestamp: new Date(conv.updated_at)
+          })
+
+          // Parse messages and restore Date objects
+          const messages = conv.messages_json.map(msg => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+          }))
+
+          loadedAllMessages[localChatId] = messages
+          loadedSessionIds.set(localChatId, conv.session_id)
+          loadedSupabaseIds.set(localChatId, conv.id)
+        })
+
+        // Update state with loaded data
+        setChatHistory(loadedChatHistory)
+        setAllChatMessages(loadedAllMessages)
+        setChatSessionIds(loadedSessionIds)
+        setChatSupabaseIds(loadedSupabaseIds)
+
+        // Set current chat to the most recent one
+        if (loadedChatHistory.length > 0) {
+          const firstChat = loadedChatHistory[0]
+          setCurrentChatId(firstChat.id)
+          setMessages(loadedAllMessages[firstChat.id] || [])
+        }
+
+        // Save to localStorage for session persistence
+        localStorage.setItem('ai-chat-history', JSON.stringify(loadedChatHistory))
+        localStorage.setItem('ai-all-chat-messages', JSON.stringify(loadedAllMessages))
+
+        console.log(`[LoadConversations] Successfully loaded ${result.conversations.length} conversations from Supabase`)
+      } else {
+        console.log('[LoadConversations] No conversations found in Supabase')
+
+        // Initialize with a default conversation
+        const defaultChat = {
+          id: Date.now(),
+          title: 'New Conversation',
+          timestamp: new Date()
+        }
+
+        const defaultMessage = {
+          id: generateUUID(),
+          type: 'ai',
+          content: 'Hello! How can I assist you today?',
+          timestamp: new Date()
+        }
+
+        setChatHistory([defaultChat])
+        setCurrentChatId(defaultChat.id)
+        setMessages([defaultMessage])
+        setAllChatMessages({ [defaultChat.id]: [defaultMessage] })
+
+        console.log('[LoadConversations] Initialized with default conversation')
+
+        // Check for migration only after initializing default state
+        const hasLocalData = localStorage.getItem('ai-chat-history') &&
+                            localStorage.getItem('ai-all-chat-messages')
+
+        console.log('[LoadConversations] Has local data:', hasLocalData)
+        if (hasLocalData) {
+          console.log('[LoadConversations] Found local data, will show migration prompt')
+          setShowMigrationPrompt(true)
+        }
+      }
+    } catch (error) {
+      clearTimeout(loadingTimeoutId)
+      console.error('[LoadConversations] Error loading conversations from Supabase:', error)
+    } finally {
+      console.log('[LoadConversations] Clearing loading state')
+      setIsLoadingConversations(false)
+    }
+  }
+
+  // Migrate localStorage data to Supabase
+  const handleMigrateLocalStorage = async () => {
+    console.log('[Migration] Starting migration process...')
+    setShowMigrationPrompt(false)
+    setIsLoadingConversations(true)
+
+    try {
+      console.log('[Migration] Calling migrateLocalStorageToSupabase with userId:', currentUser.id)
+      const result = await conversationStorageService.migrateLocalStorageToSupabase(currentUser.id)
+      console.log('[Migration] Migration result:', result)
+
+      if (result.success) {
+        console.log(`[Migration] Successfully migrated ${result.migratedCount} conversations`)
+        // Reload conversations from Supabase
+        console.log('[Migration] Reloading conversations from Supabase...')
+        await loadConversationsFromSupabase(currentUser.id)
+        console.log('[Migration] Reload complete')
+      } else {
+        console.error('[Migration] Migration failed:', result.error)
+        alert('Failed to migrate conversations. Please try again.')
+      }
+    } catch (error) {
+      console.error('[Migration] Migration error:', error)
+      alert('An error occurred during migration.')
+    } finally {
+      console.log('[Migration] Clearing loading state')
+      // ALWAYS clear loading state, even if loadConversationsFromSupabase fails
+      // This is defensive - loadConversationsFromSupabase has its own finally block,
+      // but this ensures we never get stuck in a loading state
+      setIsLoadingConversations(false)
+    }
+  }
+
+  // Skip migration and keep using localStorage
+  const handleSkipMigration = () => {
+    setShowMigrationPrompt(false)
+  }
+
+  // Helper function to save current conversation to Supabase
+  const saveCurrentConversationToSupabase = async (chatId, messagesOverride = null) => {
+    if (!currentUser?.id) return
+
+    const chat = chatHistory.find(c => c.id === chatId)
+    if (!chat) return
+
+    const sessionId = getOrCreateSessionId(chatId)
+    const messagesToSave = messagesOverride || (chatId === currentChatId ? messages : allChatMessages[chatId] || [])
+    const supabaseId = chatSupabaseIds.get(chatId)
+
+    try {
+      const result = await conversationStorageService.saveConversation(
+        currentUser.id,
+        chatId,
+        chat.title,
+        sessionId,
+        messagesToSave,
+        supabaseId
+      )
+
+      if (result.success) {
+        // Update Supabase ID if this was a new conversation
+        if (!supabaseId) {
+          setChatSupabaseIds(prev => new Map(prev).set(chatId, result.id))
+        }
+      }
+    } catch (error) {
+      console.error('Failed to save conversation to Supabase:', error)
+    }
   }
 
   // Handle window resize
@@ -648,7 +935,7 @@ function App() {
     }
   }
 
-  const createNewChat = () => {
+  const createNewChat = async () => {
     const newChatId = Date.now()
     const newChat = {
       id: newChatId,
@@ -660,11 +947,32 @@ function App() {
     const newSessionId = `session_${newChatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
     setChatSessionIds(prev => new Map(prev).set(newChatId, newSessionId))
 
+    const initialMessage = { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
+
     setChatHistory(prev => [newChat, ...prev])
     setCurrentChatId(newChatId)
-    setMessages([
-      { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
-    ])
+    setMessages([initialMessage])
+
+    // Save to Supabase if user is authenticated
+    if (currentUser?.id) {
+      try {
+        const result = await conversationStorageService.saveConversation(
+          currentUser.id,
+          newChatId,
+          newChat.title,
+          newSessionId,
+          [initialMessage]
+        )
+
+        if (result.success) {
+          // Store Supabase ID for future updates
+          setChatSupabaseIds(prev => new Map(prev).set(newChatId, result.id))
+          console.log('New conversation saved to Supabase:', result.id)
+        }
+      } catch (error) {
+        console.error('Failed to save new conversation to Supabase:', error)
+      }
+    }
   }
 
   const selectChat = (chatId) => {
@@ -698,12 +1006,33 @@ function App() {
     }
   }
 
-  const deleteChat = (chatId, event) => {
+  const deleteChat = async (chatId, event) => {
     event.stopPropagation() // Prevent triggering selectChat
 
     // Confirmation dialog
     if (!confirm('Are you sure you want to delete this conversation?')) {
       return
+    }
+
+    // Delete from Supabase if user is authenticated
+    if (currentUser?.id) {
+      const supabaseId = chatSupabaseIds.get(chatId)
+      if (supabaseId) {
+        try {
+          const result = await conversationStorageService.deleteConversation(supabaseId, currentUser.id)
+          if (result.success) {
+            console.log('Conversation deleted from Supabase:', supabaseId)
+            // Remove from tracking map
+            setChatSupabaseIds(prev => {
+              const newMap = new Map(prev)
+              newMap.delete(chatId)
+              return newMap
+            })
+          }
+        } catch (error) {
+          console.error('Failed to delete conversation from Supabase:', error)
+        }
+      }
     }
 
     // Remove chat from history
@@ -815,8 +1144,11 @@ function App() {
 
   // Authentication handlers
   const handleAuthSuccess = (user) => {
+    console.log('[Auth] handleAuthSuccess called with user:', user?.id)
+    console.log('[Auth] Setting isAuthenticated = true')
     setIsAuthenticated(true)
     setCurrentUser(user)
+    console.log('[Auth] Auth state updated, waiting for onAuthStateChange event...')
   }
 
   const handleLogout = async () => {
@@ -832,6 +1164,35 @@ function App() {
 
   return (
     <div className="app">
+      {/* Migration Prompt Modal */}
+      {showMigrationPrompt && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h2>Migrate Conversation History?</h2>
+            <p>
+              We detected existing conversations stored locally in your browser.
+              Would you like to migrate them to your account for syncing across devices?
+            </p>
+            <div className="modal-actions">
+              <button className="btn-primary" onClick={handleMigrateLocalStorage}>
+                Yes, Migrate My Conversations
+              </button>
+              <button className="btn-secondary" onClick={handleSkipMigration}>
+                Skip for Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loading Conversations Overlay */}
+      {isLoadingConversations && (
+        <div className="loading-overlay">
+          <div className="loading-spinner"></div>
+          <p>Loading conversations...</p>
+        </div>
+      )}
+
       {/* Mobile overlay */}
       {!sidebarCollapsed && isMobile && (
         <div className="mobile-overlay" onClick={toggleSidebar}></div>

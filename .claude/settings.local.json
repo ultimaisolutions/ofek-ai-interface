@@ -10,7 +10,8 @@
       "mcp__supabase__search_docs",
       "Bash(npm install:*)",
       "Bash(npm run dev:*)",
-      "Bash(npm run lint)"
+      "Bash(npm run lint)",
+      "Bash(ls:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
