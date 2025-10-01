@@ -358,8 +358,8 @@ function App() {
       return chatSessionIds.get(chatId)
     }
 
-    // Generate new session ID for this conversation
-    const newSessionId = `session_${chatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    // Generate new session ID for this conversation using UUID for uniqueness
+    const newSessionId = `session_${chatId}_${generateUUID()}`
     setChatSessionIds(prev => new Map(prev).set(chatId, newSessionId))
     return newSessionId
   }
@@ -521,6 +521,12 @@ function App() {
     const messagesToSave = messagesOverride || (chatId === currentChatId ? messages : allChatMessages[chatId] || [])
     const supabaseId = chatSupabaseIds.get(chatId)
 
+    // Prevent unnecessary saves: if messages array is empty or hasn't changed meaningfully
+    if (!messagesToSave || messagesToSave.length === 0) {
+      console.log('[SaveConversation] Skipping save - no messages to save')
+      return
+    }
+
     try {
       const result = await conversationStorageService.saveConversation(
         currentUser.id,
@@ -535,6 +541,9 @@ function App() {
         // Update Supabase ID if this was a new conversation
         if (!supabaseId) {
           setChatSupabaseIds(prev => new Map(prev).set(chatId, result.id))
+          console.log('[SaveConversation] New conversation saved with ID:', result.id)
+        } else {
+          console.log('[SaveConversation] Conversation updated:', result.id)
         }
       }
     } catch (error) {
@@ -935,7 +944,7 @@ function App() {
     }
   }
 
-  const createNewChat = async () => {
+  const createNewChat = () => {
     const newChatId = Date.now()
     const newChat = {
       id: newChatId,
@@ -943,8 +952,8 @@ function App() {
       timestamp: new Date()
     }
 
-    // Generate session ID for this new conversation
-    const newSessionId = `session_${newChatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    // Generate session ID for this new conversation using UUID for uniqueness
+    const newSessionId = `session_${newChatId}_${generateUUID()}`
     setChatSessionIds(prev => new Map(prev).set(newChatId, newSessionId))
 
     const initialMessage = { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
@@ -953,26 +962,8 @@ function App() {
     setCurrentChatId(newChatId)
     setMessages([initialMessage])
 
-    // Save to Supabase if user is authenticated
-    if (currentUser?.id) {
-      try {
-        const result = await conversationStorageService.saveConversation(
-          currentUser.id,
-          newChatId,
-          newChat.title,
-          newSessionId,
-          [initialMessage]
-        )
-
-        if (result.success) {
-          // Store Supabase ID for future updates
-          setChatSupabaseIds(prev => new Map(prev).set(newChatId, result.id))
-          console.log('New conversation saved to Supabase:', result.id)
-        }
-      } catch (error) {
-        console.error('Failed to save new conversation to Supabase:', error)
-      }
-    }
+    // Note: Conversation will be auto-saved by the debounced useEffect (line 315-329)
+    // This prevents race conditions from multiple save attempts
   }
 
   const selectChat = (chatId) => {

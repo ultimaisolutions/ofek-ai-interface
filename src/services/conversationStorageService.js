@@ -49,8 +49,26 @@ export const saveConversation = async (userId, chatId, title, sessionId, message
         .select()
         .single()
 
-      if (error) throw error
-      result = data
+      // Handle duplicate session_id conflict (error code 23505)
+      if (error && error.code === '23505' && error.message.includes('session_id')) {
+        console.warn('Session ID conflict detected, regenerating with timestamp suffix...')
+        // Regenerate session ID with additional timestamp to ensure uniqueness
+        conversationData.session_id = `${sessionId}_${Date.now()}`
+
+        // Retry insert with new session ID
+        const retryResult = await supabase
+          .from('chats')
+          .insert([conversationData])
+          .select()
+          .single()
+
+        if (retryResult.error) throw retryResult.error
+        result = retryResult.data
+      } else if (error) {
+        throw error
+      } else {
+        result = data
+      }
     }
 
     return {
