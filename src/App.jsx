@@ -1096,26 +1096,40 @@ function App() {
     // This prevents race conditions from multiple save attempts
   }
 
-  const selectChat = (chatId) => {
+  const selectChat = (chatId, skipSaveChatId = null) => {
     // CRITICAL FIX: Save current conversation to Supabase before switching
     // This prevents loss of messages if user switches chats quickly
-    httpLogger.createLogEntry('INFO', 'CHAT_SWITCH',
-      'Saving current conversation before switching chats', {
-        fromChatId: currentChatId,
-        toChatId: chatId
-      })
+    // Skip saving if the current chat was just deleted (skipSaveChatId matches)
+    const shouldSave = skipSaveChatId !== currentChatId
 
-    // Force immediate save to Supabase (non-blocking)
-    saveCurrentConversationToSupabase(currentChatId).catch(error => {
-      console.error('Failed to save conversation before switch:', error)
-    })
+    if (shouldSave) {
+      httpLogger.createLogEntry('INFO', 'CHAT_SWITCH',
+        'Saving current conversation before switching chats', {
+          fromChatId: currentChatId,
+          toChatId: chatId
+        })
+
+      // Force immediate save to Supabase (non-blocking)
+      saveCurrentConversationToSupabase(currentChatId).catch(error => {
+        console.error('Failed to save conversation before switch:', error)
+      })
+    } else {
+      httpLogger.createLogEntry('INFO', 'CHAT_SWITCH',
+        'Skipping save for deleted conversation', {
+          deletedChatId: skipSaveChatId,
+          toChatId: chatId
+        })
+    }
 
     // Save current chat messages to local state and localStorage
-    setAllChatMessages(prev => {
-      const updated = { ...prev, [currentChatId]: messages }
-      localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
-      return updated
-    })
+    // Skip saving if the current chat was just deleted
+    if (shouldSave) {
+      setAllChatMessages(prev => {
+        const updated = { ...prev, [currentChatId]: messages }
+        localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
+        return updated
+      })
+    }
 
     // Switch to new chat
     setCurrentChatId(chatId)
@@ -1185,7 +1199,8 @@ function App() {
       const remainingChats = chatHistory.filter(chat => chat.id !== chatId)
       if (remainingChats.length > 0) {
         // Switch to the most recent remaining chat
-        selectChat(remainingChats[0].id)
+        // Pass the deleted chatId so selectChat can skip saving it
+        selectChat(remainingChats[0].id, chatId)
       } else {
         // Create a new chat if no chats remain
         createNewChat()
