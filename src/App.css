@@ -742,6 +742,30 @@
   transform: none;
 }
 
+.stop-generation-btn {
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: var(--accent-red, #ef4444);
+  color: white;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s ease;
+}
+
+.stop-generation-btn:hover {
+  background: var(--accent-red-hover, #dc2626);
+  transform: scale(1.05);
+}
+
+.stop-generation-btn:active {
+  transform: scale(0.95);
+}
+
 /* Typing Indicator */
 .typing-indicator {
   display: flex;

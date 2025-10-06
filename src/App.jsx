@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import './App.css'
 import { sendMessageToWebhookWithRetry, generateUUID, testN8nConnection } from './services/webhookService'
 import responseListenerService from './services/responseListenerService'
@@ -11,6 +11,8 @@ import AuthPage from './pages/AuthPage'
 import authService from './services/authService'
 import supabase from './lib/supabaseClient'
 import conversationStorageService from './services/conversationStorageService'
+import openaiService from './services/openaiService'
+import supabaseLogger from './services/supabaseLoggerService'
 
 function App() {
   // Authentication state
@@ -90,6 +92,11 @@ function App() {
           setIsAuthenticated(true)
           setCurrentUser(user)
           console.log('[Auth] Authentication state set successfully')
+
+          // Initialize Supabase logger with user context
+          const sessionId = `session_${Date.now()}_${user.id.substring(0, 8)}`
+          supabaseLogger.initialize(user.id, sessionId)
+          console.log('[Auth] Supabase logger initialized for user:', user.id)
 
           // Fetch profile in background (non-blocking) after authentication completes
           console.log('[Auth] Scheduling background profile fetch...')
@@ -249,6 +256,10 @@ function App() {
   const [isTyping, setIsTyping] = useState(false)
   const [isSending, setIsSending] = useState(false)
 
+  // OpenAI streaming states
+  const [streamingMessageId, setStreamingMessageId] = useState(null)
+  const streamingContentRef = useRef('')
+
   // File upload states
   const [selectedFiles, setSelectedFiles] = useState([])
   const [fileUploadErrors, setFileUploadErrors] = useState([])
@@ -297,6 +308,14 @@ function App() {
     }
   }, [])
 
+  // Validate OpenAI API key on mount
+  useEffect(() => {
+    if (!openaiService.validateApiKey()) {
+      console.error('Invalid or missing OpenAI API key')
+      alert('OpenAI API key is not configured. Please add VITE_OPENAI_API_KEY to your .env file.')
+    }
+  }, [])
+
   // Save chat history to localStorage whenever it changes
   useEffect(() => {
     if (chatHistory.length > 0) {
@@ -319,12 +338,28 @@ function App() {
         [currentChatId]: messages
       }))
 
-      // Debounced save to Supabase after messages change
-      const saveTimer = setTimeout(() => {
-        saveCurrentConversationToSupabase(currentChatId)
-      }, 1000) // Wait 1 second after last change
+      // CRITICAL FIX: Save immediately when streaming completes to prevent message loss
+      const hasStreamingMessage = messages.some(msg => msg.isStreaming)
 
-      return () => clearTimeout(saveTimer)
+      if (hasStreamingMessage) {
+        // While streaming, don't save yet - wait for completion
+        httpLogger.createLogEntry('DEBUG', 'MESSAGE_PERSISTENCE',
+          'Skipping save - streaming in progress', {
+            chatId: currentChatId,
+            messageCount: messages.length
+          })
+        return
+      }
+
+      // No streaming messages - save immediately (no debounce)
+      // This prevents race condition where completed messages get lost
+      httpLogger.createLogEntry('INFO', 'MESSAGE_PERSISTENCE',
+        'Messages updated and no streaming - saving immediately', {
+          chatId: currentChatId,
+          messageCount: messages.length
+        })
+
+      saveCurrentConversationToSupabase(currentChatId)
     }
   }, [messages, currentChatId])
 
@@ -792,7 +827,7 @@ function App() {
     httpLogger.logMessageFlow(userMessage.id, 'USER_MESSAGE_CREATED', {
       contentLength: userMessage.content.length,
       contentPreview: userMessage.content.substring(0, 50) + (userMessage.content.length > 50 ? '...' : '')
-    });
+    })
 
     setMessages(prev => [...prev, userMessage])
     setInputValue('')
@@ -833,107 +868,202 @@ function App() {
       }
     }
 
-    // Set initial message state
-    httpLogger.logStateChange('App', 'messageStates', null, 'sending', {
-      messageId: userMessage.id
-    });
+    // Create placeholder AI message for streaming
+    const aiMessageId = generateUUID()
+    const aiMessage = {
+      id: aiMessageId,
+      type: 'ai',
+      content: '', // Will be filled incrementally
+      timestamp: new Date(),
+      isStreaming: true
+    }
 
-    setMessageStates(prev => {
-      const newStates = new Map(prev)
-      newStates.set(userMessage.id, 'sending')
-      return newStates
-    })
+    setIsSending(false)
+    setIsTyping(true)
+    setStreamingMessageId(aiMessageId)
+    streamingContentRef.current = ''
 
-    // Send message to webhook with response correlation
+    // Add AI placeholder to messages
+    setMessages(prev => [...prev, aiMessage])
+
     try {
-      // Get the session ID for the current conversation
-      const conversationSessionId = getOrCreateSessionId(currentChatId)
+      // Build conversation context - exclude the streaming placeholder
+      // Use messages state + userMessage variable directly to avoid React batching issues
+      const conversationMessages = [...messages, userMessage].filter(msg => !msg.isStreaming)
 
-      const webhookOptions = {
-        expectResponse: true,
-        responseFormat: 'json',
-        userId: 'anonymous',
-        sessionId: conversationSessionId
-      }
+      // Optional: Add system prompt
+      const systemPrompt = "You are a helpful AI assistant. Provide clear, concise, and accurate responses."
 
-      const webhookResult = await sendMessageToWebhookWithRetry(userMessage, webhookOptions);
-
-      if (webhookResult.success) {
-        // Update message state to sent
-        setMessageStates(prev => {
-          const newStates = new Map(prev)
-          newStates.set(userMessage.id, 'sent')
-          return newStates
+      // Stream OpenAI response
+      httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
+        'Starting OpenAI stream for message', {
+          messageId: aiMessageId,
+          conversationLength: conversationMessages.length
         })
 
-        // Check if this is just an acknowledgment or actual response
-        if (webhookResult.isAcknowledgment) {
-          console.log('Message acknowledged, waiting for AI response...')
-          setIsTyping(true)
-
-          // Start listening for the specific response
-          responseListenerService.startListening(webhookResult.messageId)
-
-          // Update message state to waiting for response
-          setMessageStates(prev => {
-            const newStates = new Map(prev)
-            newStates.set(userMessage.id, 'waiting_response')
-            return newStates
-          })
-        } else {
-          // Handle immediate response
-          const aiMessage = {
-            id: generateUUID(),
-            type: 'ai',
-            content: webhookResult.data?.content || webhookResult.rawData || 'Response received',
-            timestamp: new Date(),
-            correlationId: webhookResult.messageId
-          }
-          setMessages(prev => [...prev, aiMessage])
-
-          setMessageStates(prev => {
-            const newStates = new Map(prev)
-            newStates.set(userMessage.id, 'response_received')
-            return newStates
-          })
-        }
-      } else {
-        // Update message state to failed
-        setMessageStates(prev => {
-          const newStates = new Map(prev)
-          newStates.set(userMessage.id, 'failed')
-          return newStates
-        })
-
-        // Create an error response message
-        const aiMessage = {
-          id: generateUUID(),
-          type: 'ai',
-          content: `Failed to send message: ${webhookResult.error}`,
-          timestamp: new Date(),
-          isError: true
-        }
-        setMessages(prev => [...prev, aiMessage])
-      }
-    } catch (error) {
-      // Update message state to failed
-      setMessageStates(prev => {
-        const newStates = new Map(prev)
-        newStates.set(userMessage.id, 'failed')
-        return newStates
+      const stream = openaiService.streamChatCompletion(conversationMessages, {
+        systemPrompt,
+        temperature: 0.7,
+        maxTokens: 2000
       })
 
-      // Handle unexpected errors
-      const aiMessage = {
-        id: generateUUID(),
-        type: 'ai',
-        content: `Unexpected error occurred: ${error.message}`,
-        timestamp: new Date(),
-        isError: true
+      let chunkCount = 0
+      let lastChunkTime = Date.now()
+
+      // Process stream chunks
+      for await (const chunk of stream) {
+        chunkCount++
+        lastChunkTime = Date.now()
+        streamingContentRef.current += chunk
+
+        // Log chunk reception for debugging
+        if (chunkCount % 10 === 0) { // Log every 10th chunk to avoid spam
+          httpLogger.createLogEntry('DEBUG', 'OPENAI_STREAM',
+            `Received chunk ${chunkCount}`, {
+              messageId: aiMessageId,
+              currentLength: streamingContentRef.current.length,
+              chunkLength: chunk.length
+            })
+        }
+
+        // Update AI message with accumulated content
+        setMessages(prev => prev.map(msg =>
+          msg.id === aiMessageId
+            ? { ...msg, content: streamingContentRef.current }
+            : msg
+        ))
       }
-      setMessages(prev => [...prev, aiMessage])
+
+      // CRITICAL FIX: Always validate content before marking complete
+      const finalContent = streamingContentRef.current?.trim()
+      const hasContent = finalContent && finalContent.length > 0
+
+      httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
+        'Stream loop completed', {
+          messageId: aiMessageId,
+          chunkCount,
+          hasContent,
+          contentLength: finalContent?.length || 0,
+          lastChunkTime: new Date(lastChunkTime).toISOString()
+        })
+
+      // Log to Supabase database for persistent debugging
+      await supabaseLogger.logEvent('INFO', 'MESSAGE_LIFECYCLE',
+        `Message ${aiMessageId}: Stream completed`, {
+          messageId: aiMessageId,
+          chunkCount,
+          hasContent,
+          contentLength: finalContent?.length || 0,
+          userMessageContent: userMessage.content?.substring(0, 100)
+        }).catch(err => console.warn('Failed to log to Supabase:', err))
+
+      if (hasContent) {
+        // Stream completed successfully with content
+        setMessages(prev => prev.map(msg =>
+          msg.id === aiMessageId
+            ? {
+                ...msg,
+                content: finalContent,
+                isStreaming: false,
+                timestamp: new Date(),
+                chunkCount // For debugging
+              }
+            : msg
+        ))
+
+        httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
+          'Stream completed successfully with content', {
+            messageId: aiMessageId,
+            contentLength: finalContent.length,
+            chunkCount
+          })
+      } else {
+        // No content received - this is an error condition
+        const errorMessage = chunkCount > 0
+          ? 'Error: Stream completed but all chunks were empty'
+          : 'Error: No response received from AI (stream produced no chunks)'
+
+        setMessages(prev => prev.map(msg =>
+          msg.id === aiMessageId
+            ? {
+                ...msg,
+                content: errorMessage,
+                isError: true,
+                isStreaming: false,
+                timestamp: new Date()
+              }
+            : msg
+        ))
+
+        httpLogger.createLogEntry('ERROR', 'OPENAI_STREAM',
+          'Stream completed but no valid content received', {
+            messageId: aiMessageId,
+            chunkCount,
+            rawContent: streamingContentRef.current
+          })
+
+        // Log error to Supabase for investigation
+        await supabaseLogger.logEvent('ERROR', 'MESSAGE_ERROR',
+          `Message ${aiMessageId}: Stream produced no content`, {
+            messageId: aiMessageId,
+            chunkCount,
+            rawContent: streamingContentRef.current,
+            userMessageContent: userMessage.content?.substring(0, 100)
+          }).catch(err => console.warn('Failed to log error to Supabase:', err))
+      }
+
+    } catch (error) {
+      console.error('OpenAI streaming error:', error)
+
+      // CRITICAL FIX: Preserve any partial content received before error
+      const partialContent = streamingContentRef.current?.trim()
+      const errorContent = partialContent
+        ? `${partialContent}\n\n[Error: Stream interrupted - ${error.message}]`
+        : `Error: ${error.message}`
+
+      // Update message with error but keep partial content if any
+      setMessages(prev => prev.map(msg =>
+        msg.id === aiMessageId
+          ? {
+              ...msg,
+              content: errorContent,
+              isError: true,
+              isStreaming: false,
+              timestamp: new Date(),
+              errorMessage: error.message
+            }
+          : msg
+      ))
+
+      httpLogger.createLogEntry('ERROR', 'OPENAI_STREAM',
+        'Stream failed with error', {
+          messageId: aiMessageId,
+          error: error.message,
+          stack: error.stack,
+          partialContentLength: partialContent?.length || 0,
+          hadPartialContent: !!partialContent
+        })
+
+      // Log critical error to Supabase
+      await supabaseLogger.logEvent('ERROR', 'STREAM_FAILURE',
+        `Message ${aiMessageId}: Stream failed - ${error.message}`, {
+          messageId: aiMessageId,
+          error: error.message,
+          stack: error.stack,
+          partialContentLength: partialContent?.length || 0,
+          hadPartialContent: !!partialContent,
+          userMessageContent: userMessage.content?.substring(0, 100)
+        }).catch(err => console.warn('Failed to log critical error to Supabase:', err))
+
     } finally {
-      setIsSending(false)
+      setIsTyping(false)
+      setStreamingMessageId(null)
+      streamingContentRef.current = ''
+
+      httpLogger.createLogEntry('DEBUG', 'OPENAI_STREAM',
+        'Stream cleanup completed', {
+          messageId: aiMessageId
+        })
     }
   }
 
@@ -967,7 +1097,20 @@ function App() {
   }
 
   const selectChat = (chatId) => {
-    // Save current chat messages before switching
+    // CRITICAL FIX: Save current conversation to Supabase before switching
+    // This prevents loss of messages if user switches chats quickly
+    httpLogger.createLogEntry('INFO', 'CHAT_SWITCH',
+      'Saving current conversation before switching chats', {
+        fromChatId: currentChatId,
+        toChatId: chatId
+      })
+
+    // Force immediate save to Supabase (non-blocking)
+    saveCurrentConversationToSupabase(currentChatId).catch(error => {
+      console.error('Failed to save conversation before switch:', error)
+    })
+
+    // Save current chat messages to local state and localStorage
     setAllChatMessages(prev => {
       const updated = { ...prev, [currentChatId]: messages }
       localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
@@ -1143,6 +1286,9 @@ function App() {
   }
 
   const handleLogout = async () => {
+    // Flush any pending logs before logout
+    await supabaseLogger.shutdown()
+
     await authService.logout()
     setIsAuthenticated(false)
     setCurrentUser(null)
@@ -1328,6 +1474,40 @@ function App() {
         <div className="chat-window">
           {messages.map(message => {
             const messageStatus = getMessageStatus(message.id, message.type)
+
+            // IMPROVED: Better handling of empty AI messages
+            if (message.type === 'ai' && (!message.content || message.content.trim() === '')) {
+              // Show typing indicator if actively streaming
+              if (message.isStreaming) {
+                return (
+                  <div key={message.id} className="message ai">
+                    <div className="message-content typing">
+                      <div className="typing-indicator">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                      </div>
+                      <div className="thinking-status">AI is generating response...</div>
+                    </div>
+                  </div>
+                )
+              }
+
+              // CRITICAL FIX: Don't hide completed empty messages - show error instead
+              // This prevents "disappearing message" bug
+              return (
+                <div key={message.id} className="message ai error">
+                  <div className="message-content">
+                    <MarkdownMessage content="⚠️ Message incomplete - no content received" />
+                    <div style={{ fontSize: '0.85em', marginTop: '8px', opacity: 0.7 }}>
+                      Debug info: Message ID {message.id.substring(0, 8)}
+                      {message.timestamp && ` • ${message.timestamp.toLocaleTimeString()}`}
+                    </div>
+                  </div>
+                </div>
+              )
+            }
+
             return (
               <div key={message.id} className={`message ${message.type} ${message.isError ? 'error' : ''}`}>
                 <div className="message-content">
@@ -1393,19 +1573,6 @@ function App() {
               </div>
             )
           })}
-          {(isTyping || isSending) && (
-            <div className="message ai">
-              <div className="message-content typing">
-                <div className="typing-indicator">
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                </div>
-                {isSending && <div className="sending-status">Sending to webhook...</div>}
-                {isTyping && !isSending && <div className="thinking-status">AI is thinking...</div>}
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="chat-input-container">
@@ -1487,6 +1654,31 @@ function App() {
               onChange={(e) => setInputValue(e.target.value)}
               onKeyPress={handleKeyPress}
             />
+            {isTyping && streamingMessageId && (
+              <button
+                className="stop-generation-btn"
+                onClick={() => {
+                  openaiService.cancelRequest()
+                  setIsTyping(false)
+                  setStreamingMessageId(null)
+
+                  // Mark message as stopped
+                  setMessages(prev => prev.map(msg =>
+                    msg.id === streamingMessageId
+                      ? {
+                          ...msg,
+                          content: streamingContentRef.current + '\n\n[Generation stopped]',
+                          isStreaming: false,
+                          wasStopped: true
+                        }
+                      : msg
+                  ))
+                }}
+                title="Stop generation"
+              >
+                ⏹ Stop
+              </button>
+            )}
             <button
               className="send-btn"
               onClick={sendMessage}
