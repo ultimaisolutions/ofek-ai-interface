@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { sanitizeUserInput } from './inputSanitizationService'
+import { generateUUID } from './webhookService.js'
 
 const supabaseUrl = `https://${import.meta.env.VITE_SUPABASE_PROJECT_REF || 'gijwrusyutuyscbgpwtv'}.supabase.co`
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -27,9 +28,17 @@ class FileStorageService {
     this.progressCallbacks = new Map()
   }
 
-  async uploadFile(file, messageId, sessionId, onProgress = null) {
+  async uploadFile(file, messageId, chatId, sessionId, onProgress = null) {
     try {
-      const fileId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      console.log('🚀 Starting file upload:', {
+        fileName: file.name,
+        fileType: file.type,
+        fileSize: file.size,
+        messageId,
+        chatId
+      })
+
+      const fileId = generateUUID() // Generate proper UUID for database compatibility
 
       if (onProgress) {
         this.progressCallbacks.set(fileId, onProgress)
@@ -99,20 +108,44 @@ class FileStorageService {
         .from(BUCKET_NAME)
         .getPublicUrl(filePath)
 
+      console.log('☁️ File uploaded to Supabase Storage:', {
+        storagePath: filePath,
+        publicUrl: urlData.publicUrl
+      })
+
       const fileMetadata = {
         id: fileId,
         message_id: messageId,
+        chat_id: chatId,  // NEW: Link to actual chat
         file_name: sanitizedFileName,
         file_type: file.type,
         file_size: compressedFile.size,
         storage_path: filePath,
         upload_status: 'completed',
         download_url: urlData.publicUrl,
-        thumbnail_url: thumbnailUrl,
-        original_size: file.size
+        thumbnail_url: thumbnailUrl
       }
 
+      console.log('📎 FILE METADATA DEBUG:', {
+        id: fileMetadata.id,
+        message_id: fileMetadata.message_id,
+        chat_id: fileMetadata.chat_id,
+        file_name: fileMetadata.file_name,
+        file_type: fileMetadata.file_type,
+        file_size: fileMetadata.file_size,
+        download_url: fileMetadata.download_url,
+        has_thumbnail: !!fileMetadata.thumbnail_url
+      })
+
+      console.log('💾 Saving file metadata to database:', fileMetadata)
+
       await this.saveFileMetadata(fileMetadata)
+
+      console.log('✅ File upload complete:', {
+        fileId: fileMetadata.id,
+        fileName: fileMetadata.file_name,
+        downloadUrl: fileMetadata.download_url
+      })
 
       onProgress && onProgress(100, 'Upload complete')
       this.progressCallbacks.delete(fileId)
@@ -386,6 +419,73 @@ class FileStorageService {
 
   getProgressCallback(fileId) {
     return this.progressCallbacks.get(fileId)
+  }
+
+  /**
+   * Convert a File object to base64 data URI
+   * @param {File} file - File object to convert
+   * @returns {Promise<string>} Base64 data URI (e.g., "data:image/jpeg;base64,...")
+   */
+  async fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = (error) => reject(error)
+      reader.readAsDataURL(file)
+    })
+  }
+
+  /**
+   * Download file from URL and convert to base64
+   * @param {string} downloadUrl - Public URL to file
+   * @returns {Promise<string>} Base64 data URI
+   */
+  async downloadAsBase64(downloadUrl) {
+    try {
+      const response = await fetch(downloadUrl)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file: ${response.status}`)
+      }
+
+      const blob = await response.blob()
+
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = (error) => reject(error)
+        reader.readAsDataURL(blob)
+      })
+    } catch (error) {
+      console.error('Error downloading file as base64:', error)
+      throw error
+    }
+  }
+
+  /**
+   * Check if file type is supported by OpenAI Vision API
+   * @param {string} fileType - MIME type of file
+   * @returns {boolean}
+   */
+  isImageType(fileType) {
+    return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(fileType)
+  }
+
+  /**
+   * Check if file type is PDF
+   * @param {string} fileType - MIME type of file
+   * @returns {boolean}
+   */
+  isPDFType(fileType) {
+    return fileType === 'application/pdf'
+  }
+
+  /**
+   * Check if file is supported by OpenAI API
+   * @param {string} fileType - MIME type of file
+   * @returns {boolean}
+   */
+  isSupportedByOpenAI(fileType) {
+    return this.isImageType(fileType) || this.isPDFType(fileType)
   }
 }
 

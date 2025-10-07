@@ -343,22 +343,11 @@ function App() {
 
       if (hasStreamingMessage) {
         // While streaming, don't save yet - wait for completion
-        httpLogger.createLogEntry('DEBUG', 'MESSAGE_PERSISTENCE',
-          'Skipping save - streaming in progress', {
-            chatId: currentChatId,
-            messageCount: messages.length
-          })
         return
       }
 
       // No streaming messages - save immediately (no debounce)
       // This prevents race condition where completed messages get lost
-      httpLogger.createLogEntry('INFO', 'MESSAGE_PERSISTENCE',
-        'Messages updated and no streaming - saving immediately', {
-          chatId: currentChatId,
-          messageCount: messages.length
-        })
-
       saveCurrentConversationToSupabase(currentChatId)
     }
   }, [messages, currentChatId])
@@ -773,6 +762,20 @@ function App() {
     // Get the session ID for the current conversation
     const conversationSessionId = getOrCreateSessionId(currentChatId)
 
+    // Get the Supabase UUID for this chat
+    const supabaseId = chatSupabaseIds.get(currentChatId)
+    const chatIdForUpload = supabaseId || null
+
+    console.log('🔗 Chat ID Mapping:', {
+      currentChatId: currentChatId,
+      supabaseId: supabaseId,
+      hasMapping: !!supabaseId
+    })
+
+    if (!supabaseId) {
+      console.warn('⚠️ Chat not yet saved to Supabase, uploading with null chat_id')
+    }
+
     const uploadPromises = selectedFiles.map(async (fileItem) => {
       try {
         setUploadingFiles(prev => new Map(prev).set(fileItem.id, { status: 'uploading', progress: 0 }))
@@ -780,6 +783,7 @@ function App() {
         const result = await fileStorageService.uploadFile(
           fileItem.file,
           messageId,
+          chatIdForUpload,  // ✅ Now passing UUID or null
           conversationSessionId,
           (progress, message) => {
             setUploadingFiles(prev => new Map(prev).set(fileItem.id, {
@@ -845,13 +849,65 @@ function App() {
     // Upload files if any are selected
     let uploadedFiles = []
     if (selectedFiles.length > 0) {
+      // CRITICAL: Ensure chat exists in Supabase before uploading files
+      // Files need chat_id (UUID) which only exists after saving to Supabase
+      const supabaseId = chatSupabaseIds.get(currentChatId)
+
+      if (!supabaseId) {
+        console.log('💾 Saving conversation to Supabase before file upload...')
+        await saveCurrentConversationToSupabase(currentChatId)
+
+        // Give it a moment to complete and update state
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+
       try {
+        // CRITICAL: Convert files to base64 BEFORE uploading to Supabase
+        // This ensures OpenAI API can receive the file data
+        httpLogger.createLogEntry('INFO', 'FILE_UPLOAD',
+          'Converting files to base64 for OpenAI API', {
+            fileCount: selectedFiles.length
+          })
+
+        const filesWithBase64 = await Promise.all(
+          selectedFiles.map(async (fileItem) => {
+            try {
+              const base64 = await fileStorageService.fileToBase64(fileItem.file)
+              return {
+                ...fileItem,
+                base64: base64
+              }
+            } catch (error) {
+              console.error('Failed to convert file to base64:', fileItem.name, error)
+              return {
+                ...fileItem,
+                base64: null
+              }
+            }
+          })
+        )
+
+        // Upload to Supabase for persistence and download URLs
         uploadedFiles = await uploadFiles(userMessage.id)
+
+        // Merge base64 data with Supabase metadata
+        const filesWithMetadata = uploadedFiles.map((meta, index) => ({
+          ...meta,
+          base64: filesWithBase64[index]?.base64  // Add base64 for OpenAI API
+        }))
+
+        // Filter out files that failed base64 conversion
+        const validFiles = filesWithMetadata.filter(f => f.base64 !== null)
+
+        if (validFiles.length < uploadedFiles.length) {
+          const failedCount = uploadedFiles.length - validFiles.length
+          setFileUploadErrors([`${failedCount} file(s) failed to prepare for AI analysis`])
+        }
 
         // Update the message with file attachments
         const updatedMessage = {
           ...userMessage,
-          fileAttachments: uploadedFiles
+          fileAttachments: validFiles
         }
 
         setMessages(prev => prev.map(msg =>
@@ -861,6 +917,26 @@ function App() {
         // Clear selected files after successful upload
         setSelectedFiles([])
         setUploadingFiles(new Map())
+
+        console.log('📤 Files prepared for OpenAI:', {
+          totalFiles: uploadedFiles.length,
+          validFiles: validFiles.length,
+          fileDetails: validFiles.map(f => ({
+            name: f.file_name,
+            type: f.file_type,
+            size: f.file_size,
+            hasBase64: !!f.base64,
+            hasDownloadUrl: !!f.download_url
+          }))
+        })
+
+        httpLogger.createLogEntry('INFO', 'FILE_UPLOAD',
+          'Files prepared for OpenAI API', {
+            totalFiles: uploadedFiles.length,
+            validFiles: validFiles.length,
+            imageFiles: validFiles.filter(f => f.file_type.startsWith('image/')).length,
+            pdfFiles: validFiles.filter(f => f.file_type === 'application/pdf').length
+          })
 
       } catch (error) {
         console.error('File upload failed:', error)
@@ -1528,45 +1604,78 @@ function App() {
                 <div className="message-content">
                   <MarkdownMessage content={message.content} />
 
-                  {/* File Attachments */}
+                  {/* File Context Indicator - Shows AI analyzed files */}
+                  {message.fileAttachments && message.fileAttachments.length > 0 && message.type === 'user' && (
+                    <div className="file-context-indicator">
+                      📎 {message.fileAttachments.length} file(s) • AI can analyze these files
+                    </div>
+                  )}
+
+                  {/* File Attachments with Image Previews */}
                   {message.fileAttachments && message.fileAttachments.length > 0 && (
                     <div className="message-attachments">
                       {message.fileAttachments.map((file, index) => (
-                        <div key={index} className="file-attachment">
-                          <div className="file-attachment-info">
-                            <span className="file-icon">
-                              {file.file_type.startsWith('image/') ? '🖼️' :
-                               file.file_type.startsWith('video/') ? '🎥' :
-                               file.file_type.startsWith('audio/') ? '🎵' :
-                               file.file_type.includes('pdf') ? '📄' :
-                               file.file_type.includes('word') || file.file_type.includes('document') ? '📝' :
-                               file.file_type.includes('sheet') || file.file_type.includes('excel') || file.file_type.includes('csv') ? '📊' :
-                               '📎'}
-                            </span>
-                            <div className="file-details">
-                              <div className="file-name" title={file.file_name}>
-                                {file.file_name}
-                              </div>
-                              <div className="file-meta">
-                                {(file.file_size / 1024).toFixed(1)} KB • {file.file_type.split('/')[1]?.toUpperCase()}
-                              </div>
-                            </div>
-                          </div>
-                          {file.thumbnail_url && (
-                            <div className="file-thumbnail">
-                              <img src={file.thumbnail_url} alt="Preview" />
+                        <div
+                          key={index}
+                          className="file-attachment"
+                          onClick={() => {
+                            if (file.download_url) {
+                              window.open(file.download_url, '_blank')
+                            }
+                          }}
+                          style={{ cursor: file.download_url ? 'pointer' : 'default' }}
+                        >
+                          {/* Image Preview for Image Files */}
+                          {file.file_type?.startsWith('image/') && file.download_url && (
+                            <div className="file-image-preview">
+                              <img
+                                src={file.download_url}
+                                alt={file.file_name || 'Uploaded image'}
+                                onError={(e) => {
+                                  e.target.style.display = 'none'
+                                }}
+                              />
                             </div>
                           )}
-                          <div className="file-actions">
-                            <a
-                              href={file.download_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="download-btn"
-                              title="Download file"
-                            >
-                              ⬇️
-                            </a>
+
+                          {/* File Info Card */}
+                          <div className="file-info-card">
+                            <div className="file-attachment-info">
+                              <span className="file-icon">
+                                {file.file_type?.startsWith('image/') ? '🖼️' :
+                                 file.file_type?.startsWith('video/') ? '🎥' :
+                                 file.file_type?.startsWith('audio/') ? '🎵' :
+                                 file.file_type?.includes('pdf') ? '📄' :
+                                 file.file_type?.includes('word') || file.file_type?.includes('document') ? '📝' :
+                                 file.file_type?.includes('sheet') || file.file_type?.includes('excel') || file.file_type?.includes('csv') ? '📊' :
+                                 '📎'}
+                              </span>
+                              <div className="file-details">
+                                <div className="file-name" title={file.file_name}>
+                                  {file.file_name || 'Unnamed file'}
+                                </div>
+                                <div className="file-meta">
+                                  {file.file_size ? `${(file.file_size / 1024).toFixed(1)} KB` : 'Size unknown'}
+                                  {file.file_type && ` • ${file.file_type.split('/')[1]?.toUpperCase()}`}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Download Button */}
+                            <div className="file-actions">
+                              {file.download_url && (
+                                <a
+                                  href={file.download_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="download-btn"
+                                  title="Download file"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  ⬇️
+                                </a>
+                              )}
+                            </div>
                           </div>
                         </div>
                       ))}

@@ -12,7 +12,9 @@
       "Bash(npm run dev:*)",
       "Bash(npm run lint)",
       "Bash(ls:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

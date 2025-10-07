@@ -34,6 +34,25 @@ class OpenAIService {
     // Build messages array
     const apiMessages = this.buildMessagesArray(messages, systemPrompt)
 
+    // Validate files before sending (throws error if invalid)
+    try {
+      const fileStats = this.validateFilesForAPI(messages)
+      if (fileStats.imageCount > 0 || fileStats.pdfCount > 0) {
+        httpLogger.createLogEntry('INFO', 'OPENAI_REQUEST',
+          'Request includes file attachments', {
+            imageCount: fileStats.imageCount,
+            pdfCount: fileStats.pdfCount,
+            totalPdfSizeMB: (fileStats.totalPdfSize / (1024 * 1024)).toFixed(2)
+          })
+      }
+    } catch (validationError) {
+      httpLogger.createLogEntry('ERROR', 'OPENAI_REQUEST',
+        'File validation failed', {
+          error: validationError.message
+        })
+      throw validationError
+    }
+
     // Create new abort controller for this request
     this.abortController = new AbortController()
 
@@ -255,6 +274,7 @@ class OpenAIService {
 
   /**
    * Build messages array for OpenAI API
+   * Supports both text-only and multi-content messages (text + files)
    * @param {Array} conversationMessages - App messages
    * @param {String} systemPrompt - Optional system prompt
    * @returns {Array} OpenAI formatted messages
@@ -286,18 +306,112 @@ class OpenAIService {
         continue
       }
 
-      // 3. Messages with empty content
-      if (!msg.content || msg.content.trim() === '') {
+      // 3. Messages with empty content and no files
+      if ((!msg.content || msg.content.trim() === '') && (!msg.fileAttachments || msg.fileAttachments.length === 0)) {
         continue
       }
 
-      messages.push({
-        role: msg.type === 'user' ? 'user' : 'assistant',
-        content: msg.content
-      })
+      // Check if message has file attachments
+      if (msg.fileAttachments && msg.fileAttachments.length > 0) {
+        // Multi-content message (text + files)
+        const content = []
+
+        // Add text content if present
+        if (msg.content && msg.content.trim() !== '') {
+          content.push({
+            type: 'text',
+            text: msg.content
+          })
+        }
+
+        // Add file attachments
+        for (const file of msg.fileAttachments) {
+          if (!file.base64) {
+            console.warn('File attachment missing base64 data, skipping:', file.file_name)
+            continue
+          }
+
+          if (file.file_type.startsWith('image/')) {
+            // Image attachment
+            content.push({
+              type: 'image_url',
+              image_url: {
+                url: file.base64
+              }
+            })
+          } else if (file.file_type === 'application/pdf') {
+            // PDF attachment
+            content.push({
+              type: 'file',
+              filename: file.file_name,
+              file_data: file.base64
+            })
+          } else {
+            console.warn('Unsupported file type for OpenAI API:', file.file_type)
+          }
+        }
+
+        // Only add message if it has content
+        if (content.length > 0) {
+          messages.push({
+            role: msg.type === 'user' ? 'user' : 'assistant',
+            content: content
+          })
+        }
+      } else {
+        // Text-only message
+        messages.push({
+          role: msg.type === 'user' ? 'user' : 'assistant',
+          content: msg.content
+        })
+      }
     }
 
     return messages
+  }
+
+  /**
+   * Validate files in messages before sending to OpenAI API
+   * @param {Array} messages - Messages array to validate
+   * @throws {Error} If validation fails
+   */
+  validateFilesForAPI(messages) {
+    let imageCount = 0
+    let pdfCount = 0
+    let totalPdfSize = 0
+    const errors = []
+
+    for (const msg of messages) {
+      if (!msg.fileAttachments || msg.fileAttachments.length === 0) {
+        continue
+      }
+
+      for (const file of msg.fileAttachments) {
+        if (file.file_type.startsWith('image/')) {
+          imageCount++
+          if (imageCount > 10) {
+            errors.push('Maximum 10 images per request. Please remove some images.')
+          }
+        } else if (file.file_type === 'application/pdf') {
+          pdfCount++
+          totalPdfSize += file.file_size
+
+          if (totalPdfSize > 32 * 1024 * 1024) {
+            errors.push('PDF files exceed 32MB total size limit. Please upload smaller PDFs.')
+          }
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new Error(errors.join(' '))
+    }
+
+    return {
+      imageCount,
+      pdfCount,
+      totalPdfSize
+    }
   }
 
   /**
