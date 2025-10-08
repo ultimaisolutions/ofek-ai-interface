@@ -1,5 +1,7 @@
 // src/services/openaiService.js
+// Migrated to OpenAI Responses API from Chat Completions API
 
+import OpenAI from 'openai'
 import httpLogger from './httpLoggerService.js'
 import supabaseLogger from './supabaseLoggerService.js'
 
@@ -7,32 +9,49 @@ class OpenAIService {
   constructor() {
     // Configuration
     this.apiKey = import.meta.env.VITE_OPENAI_API_KEY
-    this.baseUrl = 'https://api.openai.com/v1'
     this.defaultModel = 'gpt-4o-mini' // Fast, cost-effective
     this.abortController = null
 
-    // Validate API key on initialization
-    if (!this.apiKey) {
+    // Initialize OpenAI client
+    this.client = null
+    if (this.apiKey) {
+      this.client = new OpenAI({
+        apiKey: this.apiKey,
+        dangerouslyAllowBrowser: true // Required for client-side usage (dev only)
+      })
+    } else {
       console.error('VITE_OPENAI_API_KEY not found in environment variables')
     }
+
+    // Response tracking for conversation chaining
+    this.conversationResponses = new Map() // chatId -> last response ID
   }
 
   /**
-   * Stream chat completion with incremental updates
-   * @param {Array} messages - Conversation history in OpenAI format
+   * Stream response from OpenAI Responses API with incremental updates
+   * @param {Array} messages - Conversation history in app format
    * @param {Object} options - Configuration options
    * @returns {AsyncGenerator} Stream of content chunks
    */
-  async *streamChatCompletion(messages, options = {}) {
+  async *streamResponse(messages, options = {}) {
     const {
       model = this.defaultModel,
       temperature = 0.7,
       maxTokens = 2000,
-      systemPrompt = null
+      systemPrompt = null,
+      chatId = null // For response chaining
     } = options
 
-    // Build messages array
-    const apiMessages = this.buildMessagesArray(messages, systemPrompt)
+    if (!this.client) {
+      throw new Error('OpenAI client not initialized. Check API key.')
+    }
+
+    // Build request for Responses API
+    const { input, instructions, previousResponseId } = this.buildResponseRequest(
+      messages,
+      systemPrompt,
+      chatId
+    )
 
     // Validate files before sending (throws error if invalid)
     try {
@@ -58,20 +77,27 @@ class OpenAIService {
 
     const requestBody = {
       model,
-      messages: apiMessages,
-      stream: true,
+      input,
       temperature,
-      max_tokens: maxTokens
+      ...(instructions && { instructions }), // Only include if present
+      ...(previousResponseId && { previous_response_id: previousResponseId }) // For multi-turn
+    }
+
+    // Add max_tokens if specified (Responses API uses different field name)
+    if (maxTokens) {
+      requestBody.max_output_tokens = maxTokens
     }
 
     const requestStartTime = Date.now()
     let totalChunks = 0
     let totalContentLength = 0
+    let responseId = null
 
     httpLogger.createLogEntry('INFO', 'OPENAI_REQUEST',
-      'Starting OpenAI streaming request', {
+      'Starting OpenAI Responses API streaming request', {
         model,
-        messageCount: apiMessages.length,
+        hasInstructions: !!instructions,
+        hasPreviousResponse: !!previousResponseId,
         temperature,
         maxTokens,
         requestBody: JSON.stringify(requestBody).substring(0, 500) // Log first 500 chars
@@ -80,57 +106,35 @@ class OpenAIService {
     // Log to Supabase for persistent debugging
     await supabaseLogger.logOpenAIStream({
       level: 'INFO',
-      message: 'Starting OpenAI streaming request',
+      message: 'Starting OpenAI Responses API streaming request',
       correlationId: `openai-${Date.now()}`,
       requestBody: requestBody,
       metadata: {
         model,
-        messageCount: apiMessages.length,
+        hasInstructions: !!instructions,
+        hasPreviousResponse: !!previousResponseId,
         temperature,
         maxTokens
       }
     }).catch(err => console.warn('Failed to log to Supabase:', err))
 
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(requestBody),
+      // Use OpenAI SDK's native streaming with Responses API
+      const stream = await this.client.responses.create({
+        ...requestBody,
+        stream: true
+      }, {
         signal: this.abortController.signal
       })
 
-      if (!response.ok) {
-        const errorData = await response.json()
-        const errorMessage = `OpenAI API Error: ${response.status} - ${errorData.error?.message || 'Unknown error'}`
-
-        httpLogger.createLogEntry('ERROR', 'OPENAI_REQUEST',
-          'OpenAI API returned error status', {
-            status: response.status,
-            statusText: response.statusText,
-            errorData,
-            requestDuration: Date.now() - requestStartTime
-          })
-
-        throw new Error(errorMessage)
-      }
-
       httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
-        'Stream connection established', {
-          status: response.status,
-          headers: Object.fromEntries(response.headers.entries())
-        })
+        'Stream connection established via SDK', {})
 
-      // Stream processing with interruption detection
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
       let lastChunkTime = Date.now()
       const CHUNK_TIMEOUT_MS = 30000 // 30 second timeout between chunks
 
-      while (true) {
+      // Stream processing using SDK's async iterator
+      for await (const chunk of stream) {
         // CRITICAL: Detect stream stalls
         const timeSinceLastChunk = Date.now() - lastChunkTime
         if (timeSinceLastChunk > CHUNK_TIMEOUT_MS) {
@@ -144,84 +148,66 @@ class OpenAIService {
           throw new Error(`Stream stalled: No data received for ${CHUNK_TIMEOUT_MS}ms`)
         }
 
-        const { done, value } = await reader.read()
+        lastChunkTime = Date.now()
 
-        if (done) {
-          const streamDuration = Date.now() - requestStartTime
-          httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
-            'Stream completed successfully', {
-              totalChunks,
-              totalContentLength,
-              streamDuration,
-              avgChunkSize: totalChunks > 0 ? (totalContentLength / totalChunks).toFixed(2) : 0
-            })
+        // Extract content from SDK response
+        // Responses API uses 'output_text' field
+        const content = chunk.output?.[0]?.content?.[0]?.text || chunk.delta
 
-          // Log successful completion to Supabase
-          await supabaseLogger.logOpenAIStream({
-            level: 'INFO',
-            message: 'OpenAI stream completed successfully',
-            metadata: {
-              totalChunks,
-              totalContentLength,
-              streamDuration,
-              avgChunkSize: totalChunks > 0 ? (totalContentLength / totalChunks).toFixed(2) : 0
-            }
-          }).catch(err => console.warn('Failed to log to Supabase:', err))
-
-          break
+        // Store response ID for conversation chaining
+        if (chunk.id && !responseId) {
+          responseId = chunk.id
         }
 
-        lastChunkTime = Date.now()
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() // Keep incomplete line in buffer
+        if (content) {
+          totalChunks++
+          totalContentLength += content.length
+          yield content
+        }
 
-        for (const line of lines) {
-          const trimmed = line.trim()
-
-          // Skip empty lines and comments
-          if (!trimmed || trimmed.startsWith(':')) continue
-
-          // Check for stream end
-          if (trimmed === 'data: [DONE]') {
-            httpLogger.createLogEntry('DEBUG', 'OPENAI_STREAM',
-              'Received [DONE] marker', { totalChunks })
-            continue
-          }
-
-          // Parse SSE data
-          if (trimmed.startsWith('data: ')) {
-            const jsonStr = trimmed.substring(6)
-
-            try {
-              const parsed = JSON.parse(jsonStr)
-              const content = parsed.choices[0]?.delta?.content
-
-              if (content) {
-                totalChunks++
-                totalContentLength += content.length
-                yield content
-              }
-
-              // Check for finish reason
-              if (parsed.choices[0]?.finish_reason) {
-                httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
-                  `Stream finished with reason: ${parsed.choices[0].finish_reason}`, {
-                    totalChunks,
-                    totalContentLength,
-                    finishReason: parsed.choices[0].finish_reason
-                  })
-              }
-            } catch (parseError) {
-              httpLogger.createLogEntry('WARN', 'OPENAI_STREAM',
-                'Failed to parse SSE chunk', {
-                  error: parseError.message,
-                  rawChunk: jsonStr.substring(0, 200)
-                })
-            }
-          }
+        // Check for completion
+        if (chunk.done || chunk.status === 'completed') {
+          httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
+            'Stream marked as completed by API', {
+              totalChunks,
+              totalContentLength,
+              responseId
+            })
         }
       }
+
+      // Store response ID for future conversation chaining
+      if (responseId && chatId) {
+        this.conversationResponses.set(chatId, responseId)
+        httpLogger.createLogEntry('DEBUG', 'OPENAI_STREAM',
+          'Stored response ID for conversation chaining', {
+            chatId,
+            responseId
+          })
+      }
+
+      const streamDuration = Date.now() - requestStartTime
+      httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
+        'Stream completed successfully', {
+          totalChunks,
+          totalContentLength,
+          streamDuration,
+          responseId,
+          avgChunkSize: totalChunks > 0 ? (totalContentLength / totalChunks).toFixed(2) : 0
+        })
+
+      // Log successful completion to Supabase
+      await supabaseLogger.logOpenAIStream({
+        level: 'INFO',
+        message: 'OpenAI Responses API stream completed successfully',
+        metadata: {
+          totalChunks,
+          totalContentLength,
+          streamDuration,
+          responseId,
+          avgChunkSize: totalChunks > 0 ? (totalContentLength / totalChunks).toFixed(2) : 0
+        }
+      }).catch(err => console.warn('Failed to log to Supabase:', err))
 
     } catch (error) {
       const requestDuration = Date.now() - requestStartTime
@@ -237,7 +223,7 @@ class OpenAIService {
       }
 
       httpLogger.createLogEntry('ERROR', 'OPENAI_REQUEST',
-        'OpenAI streaming request failed', {
+        'OpenAI Responses API streaming request failed', {
           error: error.message,
           stack: error.stack,
           requestDuration,
@@ -249,7 +235,7 @@ class OpenAIService {
       // Log error to Supabase for debugging
       await supabaseLogger.logOpenAIStream({
         level: 'ERROR',
-        message: 'OpenAI streaming request failed',
+        message: 'OpenAI Responses API streaming request failed',
         error: error.message,
         stack: error.stack,
         metadata: {
@@ -273,101 +259,143 @@ class OpenAIService {
   }
 
   /**
-   * Build messages array for OpenAI API
-   * Supports both text-only and multi-content messages (text + files)
+   * Build request for OpenAI Responses API
+   * Separates instructions (system) from input (user message/context)
    * @param {Array} conversationMessages - App messages
-   * @param {String} systemPrompt - Optional system prompt
-   * @returns {Array} OpenAI formatted messages
+   * @param {String} systemPrompt - System instructions
+   * @param {String} chatId - Chat ID for response chaining
+   * @returns {Object} { input, instructions, previousResponseId }
    */
-  buildMessagesArray(conversationMessages, systemPrompt) {
-    const messages = []
+  buildResponseRequest(conversationMessages, systemPrompt, chatId) {
+    // Get previous response ID for conversation chaining
+    const previousResponseId = chatId ? this.conversationResponses.get(chatId) : null
 
-    // Add system prompt if provided
-    if (systemPrompt) {
-      messages.push({
-        role: 'system',
-        content: systemPrompt
-      })
+    // Filter out messages that should not be sent
+    const validMessages = conversationMessages.filter(msg => {
+      // Skip initial AI greeting
+      if (msg.content === 'Hello! How can I assist you today?' && msg.type === 'ai') {
+        return false
+      }
+      // Skip streaming messages (placeholders)
+      if (msg.isStreaming) {
+        return false
+      }
+      // Skip empty messages without files
+      if ((!msg.content || msg.content.trim() === '') &&
+          (!msg.fileAttachments || msg.fileAttachments.length === 0)) {
+        return false
+      }
+      return true
+    })
+
+    // For Responses API with conversation chaining:
+    // - instructions: System prompt (stays constant)
+    // - input: Current turn's input (can be text or structured content with files)
+    // - previous_response_id: Links to previous response for context
+
+    let input
+
+    // If we have a previous response, we can use simpler input (just the latest user message)
+    // Otherwise, we need to provide full context in input
+    if (previousResponseId) {
+      // Multi-turn with chaining: just send the latest user message
+      const latestUserMessage = [...validMessages].reverse().find(msg => msg.type === 'user')
+
+      if (!latestUserMessage) {
+        throw new Error('No user message found for input')
+      }
+
+      input = this.formatMessageContent(latestUserMessage)
+    } else {
+      // First turn or no chaining: Build context in input
+      // Format as array of role/content objects similar to Chat Completions
+      const contextMessages = validMessages.slice(-20).map(msg => ({
+        role: msg.type === 'user' ? 'user' : 'assistant',
+        content: this.formatMessageContent(msg)
+      }))
+
+      // For multi-message context, format as structured input
+      if (contextMessages.length === 1) {
+        input = contextMessages[0].content
+      } else {
+        // Multiple messages: create a context structure
+        // Note: This is a workaround since Responses API prefers chaining
+        input = contextMessages
+      }
     }
 
-    // Convert app messages to OpenAI format
-    // Only include last N messages to stay within context window
-    const recentMessages = conversationMessages.slice(-20)
+    return {
+      input,
+      instructions: systemPrompt || undefined,
+      previousResponseId: previousResponseId || undefined
+    }
+  }
 
-    for (const msg of recentMessages) {
-      // Skip messages that should not be sent to OpenAI:
-      // 1. Initial AI greeting
-      if (msg.content === 'Hello! How can I assist you today?' && msg.type === 'ai') {
-        continue
-      }
+  /**
+   * Format message content for Responses API
+   * Handles both text-only and multi-content (text + files)
+   * @param {Object} message - Message object
+   * @returns {String|Array} Formatted content
+   */
+  formatMessageContent(message) {
+    // Check if message has file attachments
+    if (message.fileAttachments && message.fileAttachments.length > 0) {
+      // Multi-content message (text + files)
+      const content = []
 
-      // 2. Streaming messages (placeholders with no content yet)
-      if (msg.isStreaming) {
-        continue
-      }
-
-      // 3. Messages with empty content and no files
-      if ((!msg.content || msg.content.trim() === '') && (!msg.fileAttachments || msg.fileAttachments.length === 0)) {
-        continue
-      }
-
-      // Check if message has file attachments
-      if (msg.fileAttachments && msg.fileAttachments.length > 0) {
-        // Multi-content message (text + files)
-        const content = []
-
-        // Add text content if present
-        if (msg.content && msg.content.trim() !== '') {
-          content.push({
-            type: 'text',
-            text: msg.content
-          })
-        }
-
-        // Add file attachments
-        for (const file of msg.fileAttachments) {
-          if (!file.base64) {
-            console.warn('File attachment missing base64 data, skipping:', file.file_name)
-            continue
-          }
-
-          if (file.file_type.startsWith('image/')) {
-            // Image attachment
-            content.push({
-              type: 'image_url',
-              image_url: {
-                url: file.base64
-              }
-            })
-          } else if (file.file_type === 'application/pdf') {
-            // PDF attachment
-            content.push({
-              type: 'file',
-              filename: file.file_name,
-              file_data: file.base64
-            })
-          } else {
-            console.warn('Unsupported file type for OpenAI API:', file.file_type)
-          }
-        }
-
-        // Only add message if it has content
-        if (content.length > 0) {
-          messages.push({
-            role: msg.type === 'user' ? 'user' : 'assistant',
-            content: content
-          })
-        }
-      } else {
-        // Text-only message
-        messages.push({
-          role: msg.type === 'user' ? 'user' : 'assistant',
-          content: msg.content
+      // Add text content if present
+      if (message.content && message.content.trim() !== '') {
+        content.push({
+          type: 'text',
+          text: message.content
         })
       }
-    }
 
-    return messages
+      // Add file attachments
+      for (const file of message.fileAttachments) {
+        if (!file.base64) {
+          console.warn('File attachment missing base64 data, skipping:', file.file_name)
+          continue
+        }
+
+        if (file.file_type.startsWith('image/')) {
+          // Image attachment
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: file.base64
+            }
+          })
+        } else if (file.file_type === 'application/pdf') {
+          // PDF attachment
+          content.push({
+            type: 'file',
+            filename: file.file_name,
+            file_data: file.base64
+          })
+        } else {
+          console.warn('Unsupported file type for OpenAI API:', file.file_type)
+        }
+      }
+
+      return content.length > 0 ? content : message.content
+    } else {
+      // Text-only message
+      return message.content
+    }
+  }
+
+  /**
+   * Clear conversation response history for a chat
+   * Useful when starting a new conversation or resetting context
+   * @param {String} chatId - Chat ID to clear
+   */
+  clearConversationHistory(chatId) {
+    if (chatId) {
+      this.conversationResponses.delete(chatId)
+      httpLogger.createLogEntry('DEBUG', 'OPENAI_SERVICE',
+        'Cleared conversation response history', { chatId })
+    }
   }
 
   /**
@@ -444,6 +472,32 @@ class OpenAIService {
   estimateTokens(text) {
     // Rough estimate: 1 token ≈ 4 characters
     return Math.ceil(text.length / 4)
+  }
+
+  // LEGACY METHOD - Kept for backwards compatibility
+  // Redirects to streamResponse
+  async *streamChatCompletion(messages, options = {}) {
+    console.warn('streamChatCompletion is deprecated. Use streamResponse instead.')
+    yield* this.streamResponse(messages, options)
+  }
+
+  // LEGACY METHOD - Kept for backwards compatibility
+  // Redirects to buildResponseRequest
+  buildMessagesArray(conversationMessages, systemPrompt) {
+    console.warn('buildMessagesArray is deprecated. Use buildResponseRequest instead.')
+    const { input, instructions } = this.buildResponseRequest(conversationMessages, systemPrompt, null)
+
+    // Format as old-style messages array for compatibility
+    const messages = []
+    if (instructions) {
+      messages.push({ role: 'system', content: instructions })
+    }
+    if (Array.isArray(input)) {
+      messages.push(...input)
+    } else {
+      messages.push({ role: 'user', content: input })
+    }
+    return messages
   }
 }
 

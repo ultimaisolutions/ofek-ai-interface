@@ -980,7 +980,8 @@ function App() {
       const stream = openaiService.streamChatCompletion(conversationMessages, {
         systemPrompt,
         temperature: 0.7,
-        maxTokens: 2000
+        maxTokens: 2000,
+        chatId: currentChatId // For response chaining in Responses API
       })
 
       let chunkCount = 0
@@ -1162,6 +1163,9 @@ function App() {
     const newSessionId = `session_${newChatId}_${generateUUID()}`
     setChatSessionIds(prev => new Map(prev).set(newChatId, newSessionId))
 
+    // Clear OpenAI conversation history for fresh context (Responses API)
+    openaiService.clearConversationHistory(currentChatId)
+
     const initialMessage = { id: generateUUID(), type: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date() }
 
     setChatHistory(prev => [newChat, ...prev])
@@ -1269,6 +1273,9 @@ function App() {
       localStorage.setItem('ai-all-chat-messages', JSON.stringify(updated))
       return updated
     })
+
+    // Clear OpenAI conversation history for this chat (Responses API)
+    openaiService.clearConversationHistory(chatId)
 
     // If deleting the current chat, switch to another chat or create new one
     if (chatId === currentChatId) {
