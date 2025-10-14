@@ -1498,12 +1498,6 @@ function App() {
         <div className="mobile-overlay" onClick={toggleSidebar}></div>
       )}
 
-      {/* Mobile floating button */}
-      {sidebarCollapsed && (
-        <button className="mobile-menu-btn" onClick={toggleSidebar}>
-          <span className="hamburger"></span>
-        </button>
-      )}
 
       <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
@@ -1572,6 +1566,19 @@ function App() {
       </div>
 
       <div className="main-content">
+        {/* Mobile header bar - only shown on mobile when sidebar is collapsed */}
+        {isMobile && sidebarCollapsed && (
+          <div className="mobile-header">
+            <button className="mobile-header-btn" onClick={toggleSidebar}>
+              <span className="hamburger"></span>
+            </button>
+            <h1 className="mobile-header-title">Chat</h1>
+            <div className="mobile-header-actions">
+              {/* Future: Add new chat button, settings, etc. */}
+            </div>
+          </div>
+        )}
+
         <div className="chat-window">
           {messages.map(message => {
             const messageStatus = getMessageStatus(message.id, message.type)

@@ -878,43 +878,86 @@
     backdrop-filter: blur(4px);
   }
 
-  .mobile-menu-btn {
-    position: fixed;
-    top: 16px;
-    left: 16px;
-    width: 52px;
-    height: 52px;
-    border-radius: 14px;
+  /* Mobile Header Bar - ChatGPT Style */
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
     background: var(--glass-bg);
-    backdrop-filter: blur(16px);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-color);
+    min-height: 56px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    gap: 1rem;
+  }
+
+  .mobile-header-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: var(--tertiary-bg);
     border: 1px solid var(--border-color);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 50;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.15);
     transition: all 0.2s ease;
+    flex-shrink: 0;
   }
 
-  .mobile-menu-btn::before {
-    content: '';
-    position: absolute;
-    inset: -4px;
-    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.05));
-    border-radius: 16px;
-    z-index: -1;
-    opacity: 0;
-    transition: opacity 0.2s ease;
-  }
-
-  .mobile-menu-btn:hover {
+  .mobile-header-btn:hover {
     background: var(--accent-bg);
     border-color: var(--accent-blue);
     transform: scale(1.05);
   }
 
-  .mobile-menu-btn:hover::before {
-    opacity: 1;
+  .mobile-header-btn:active {
+    transform: scale(0.95);
+  }
+
+  .mobile-header-btn .hamburger {
+    width: 16px;
+    height: 2px;
+    background: var(--text-primary);
+    position: relative;
+    transition: all 0.3s ease;
+    border-radius: 1px;
+  }
+
+  .mobile-header-btn .hamburger::before,
+  .mobile-header-btn .hamburger::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    width: 16px;
+    height: 2px;
+    background: var(--text-primary);
+    transition: all 0.3s ease;
+    border-radius: 1px;
+  }
+
+  .mobile-header-btn .hamburger::before {
+    top: -5px;
+  }
+
+  .mobile-header-btn .hamburger::after {
+    top: 5px;
+  }
+
+  .mobile-header-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+    flex: 1;
+    text-align: center;
+  }
+
+  .mobile-header-actions {
+    width: 36px; /* Same as button width for symmetry */
+    flex-shrink: 0;
   }
 
   .sidebar {
