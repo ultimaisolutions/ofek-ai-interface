@@ -1558,68 +1558,6 @@ function App() {
       </div>
 
       <div className="main-content">
-        {/* Connection Status Bar */}
-        <div className="connection-status-bar">
-          <div className="connection-info">
-            {/* n8n Instance Connection Status */}
-            <div className="n8n-connection-status">
-              <span
-                className="connection-indicator"
-                style={{ color: getN8nConnectionStatusInfo().color }}
-              >
-                {getN8nConnectionStatusInfo().icon}
-              </span>
-              <span className="connection-text">
-                {getN8nConnectionStatusInfo().text}
-              </span>
-              {n8nLastTestTime && (
-                <span className="last-test-time" title={n8nLastTestTime.toLocaleString()}>
-                  (tested {n8nLastTestTime.toLocaleTimeString()})
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* n8n Connection Error */}
-          {n8nConnectionError && (
-            <div className="connection-error">
-              <span className="error-message">{n8nConnectionError}</span>
-              <button
-                className="retry-btn"
-                onClick={handleTestN8nConnection}
-                disabled={n8nConnectionStatus === 'testing'}
-              >
-                Retry
-              </button>
-            </div>
-          )}
-
-          {lastConnectionError && (
-            <div className="connection-error">
-              <span className="error-message">{lastConnectionError.message}</span>
-              <button
-                className="retry-btn"
-                onClick={retryConnection}
-                disabled={connectionStatus === 'connecting'}
-              >
-                Retry
-              </button>
-            </div>
-          )}
-
-          {!lastConnectionError && connectionStatus === 'disconnected' && (
-            <div className="connection-controls">
-              <button
-                className="test-connection-btn"
-                onClick={handleTestN8nConnection}
-                disabled={n8nConnectionStatus === 'testing'}
-              >
-                {n8nConnectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
-              </button>
-            </div>
-          )}
-        </div>
-
         <div className="chat-window">
           {messages.map(message => {
             const messageStatus = getMessageStatus(message.id, message.type)

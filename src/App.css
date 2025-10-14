@@ -869,26 +869,41 @@
 
   .mobile-menu-btn {
     position: fixed;
-    top: 20px;
-    left: 20px;
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
+    top: 16px;
+    left: 16px;
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
     background: var(--glass-bg);
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(16px);
     border: 1px solid var(--border-color);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 50;
-    box-shadow: var(--shadow-medium);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(0, 0, 0, 0.15);
     transition: all 0.2s ease;
+  }
+
+  .mobile-menu-btn::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.05));
+    border-radius: 16px;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.2s ease;
   }
 
   .mobile-menu-btn:hover {
     background: var(--accent-bg);
     border-color: var(--accent-blue);
     transform: scale(1.05);
+  }
+
+  .mobile-menu-btn:hover::before {
+    opacity: 1;
   }
 
   .sidebar {
@@ -1250,12 +1265,6 @@
 
 /* Responsive Updates for New Elements */
 @media (max-width: 768px) {
-  .connection-status-bar {
-    padding: 6px 12px;
-    font-size: 0.8rem;
-    gap: 12px;
-  }
-
   .connection-info {
     gap: 8px;
   }
@@ -1279,12 +1288,6 @@
 }
 
 @media (max-width: 480px) {
-  .connection-status-bar {
-    padding: 4px 8px;
-    font-size: 0.75rem;
-    gap: 8px;
-  }
-
   .connection-error {
     gap: 8px;
   }
