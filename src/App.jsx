@@ -6,6 +6,7 @@ import httpLogger from './services/httpLoggerService'
 import { sanitizeUserInput } from './services/inputSanitizationService'
 import FileUploadButton from './components/FileUploadButton'
 import fileStorageService from './services/fileStorageService'
+import n8nFileProcessorService from './services/n8nFileProcessorService'
 import MarkdownMessage from './components/MarkdownMessage'
 import AuthPage from './pages/AuthPage'
 import authService from './services/authService'
@@ -904,10 +905,57 @@ function App() {
           setFileUploadErrors([`${failedCount} file(s) failed to prepare for AI analysis`])
         }
 
-        // Update the message with file attachments
+        // NEW: Process files via n8n to get descriptions
+        // This happens for all files, but descriptions are only used for non-image/non-PDF files
+        const conversationSessionId = getOrCreateSessionId(currentChatId)
+
+        httpLogger.createLogEntry('INFO', 'N8N_PROCESSING',
+          'Starting n8n file processing', {
+            fileCount: validFiles.length
+          })
+
+        const n8nResults = await n8nFileProcessorService.processMultipleFiles(
+          validFiles,
+          conversationSessionId
+        )
+
+        // Merge n8n descriptions with file metadata
+        const filesWithDescriptions = validFiles.map((file, index) => ({
+          ...file,
+          n8nDescription: n8nResults[index]?.description || null,
+          n8nProcessed: n8nResults[index]?.success || false,
+          n8nError: n8nResults[index]?.error || null
+        }))
+
+        // Check if all n8n processing failed
+        const allN8nFailed = n8nResults.every(r => !r.success)
+        const someN8nFailed = n8nResults.some(r => !r.success)
+
+        if (allN8nFailed) {
+          const errorDetails = n8nResults.map(r => r.error).join(', ')
+          setFileUploadErrors([
+            `File upload processing is currently unavailable: ${errorDetails}`
+          ])
+          // Don't block sending - files still uploaded to Supabase
+          console.warn('All n8n file processing failed, continuing without descriptions')
+        } else if (someN8nFailed) {
+          const failedCount = n8nResults.filter(r => !r.success).length
+          setFileUploadErrors([
+            `Warning: ${failedCount} file(s) could not be processed for content extraction`
+          ])
+        }
+
+        httpLogger.createLogEntry('INFO', 'N8N_PROCESSING',
+          'n8n file processing complete', {
+            totalFiles: validFiles.length,
+            successful: n8nResults.filter(r => r.success).length,
+            failed: n8nResults.filter(r => !r.success).length
+          })
+
+        // Update the message with file attachments including n8n descriptions
         const updatedMessage = {
           ...userMessage,
-          fileAttachments: validFiles
+          fileAttachments: filesWithDescriptions
         }
 
         setMessages(prev => prev.map(msg =>
@@ -920,22 +968,25 @@ function App() {
 
         console.log('📤 Files prepared for OpenAI:', {
           totalFiles: uploadedFiles.length,
-          validFiles: validFiles.length,
-          fileDetails: validFiles.map(f => ({
+          validFiles: filesWithDescriptions.length,
+          n8nProcessed: n8nResults.filter(r => r.success).length,
+          fileDetails: filesWithDescriptions.map(f => ({
             name: f.file_name,
             type: f.file_type,
             size: f.file_size,
             hasBase64: !!f.base64,
-            hasDownloadUrl: !!f.download_url
+            hasDownloadUrl: !!f.download_url,
+            hasN8nDescription: !!f.n8nDescription
           }))
         })
 
         httpLogger.createLogEntry('INFO', 'FILE_UPLOAD',
           'Files prepared for OpenAI API', {
             totalFiles: uploadedFiles.length,
-            validFiles: validFiles.length,
-            imageFiles: validFiles.filter(f => f.file_type.startsWith('image/')).length,
-            pdfFiles: validFiles.filter(f => f.file_type === 'application/pdf').length
+            validFiles: filesWithDescriptions.length,
+            imageFiles: filesWithDescriptions.filter(f => f.file_type.startsWith('image/')).length,
+            pdfFiles: filesWithDescriptions.filter(f => f.file_type === 'application/pdf').length,
+            n8nProcessed: n8nResults.filter(r => r.success).length
           })
 
       } catch (error) {
@@ -1614,7 +1665,11 @@ function App() {
                   {/* File Context Indicator - Shows AI analyzed files */}
                   {message.fileAttachments && message.fileAttachments.length > 0 && message.type === 'user' && (
                     <div className="file-context-indicator">
-                      📎 {message.fileAttachments.length} file(s) • AI can analyze these files
+                      📎 {message.fileAttachments.length} file(s) •
+                      {message.fileAttachments.filter(f => f.n8nProcessed).length > 0 &&
+                        ` ${message.fileAttachments.filter(f => f.n8nProcessed).length} processed`}
+                      {message.fileAttachments.filter(f => !f.n8nProcessed && f.n8nError).length > 0 &&
+                        ` • ${message.fileAttachments.filter(f => !f.n8nProcessed && f.n8nError).length} failed`}
                     </div>
                   )}
 
@@ -1664,6 +1719,8 @@ function App() {
                                 <div className="file-meta">
                                   {file.file_size ? `${(file.file_size / 1024).toFixed(1)} KB` : 'Size unknown'}
                                   {file.file_type && ` • ${file.file_type.split('/')[1]?.toUpperCase()}`}
+                                  {file.n8nProcessed && ' • ✓ Processed'}
+                                  {!file.n8nProcessed && file.n8nError && ' • ⚠️ Processing failed'}
                                 </div>
                               </div>
                             </div>

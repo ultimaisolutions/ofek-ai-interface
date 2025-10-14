@@ -9,7 +9,9 @@ class OpenAIService {
   constructor() {
     // Configuration
     this.apiKey = import.meta.env.VITE_OPENAI_API_KEY
-    this.defaultModel = 'gpt-4o-mini' // Fast, cost-effective
+    // Use gpt-4o-mini for vision support with Responses API
+    // Note: gpt-4o, gpt-4o-mini, and gpt-4.1 series all support vision
+    this.defaultModel = 'gpt-4o-mini'
     this.abortController = null
 
     // Initialize OpenAI client
@@ -93,15 +95,52 @@ class OpenAIService {
     let totalContentLength = 0
     let responseId = null
 
+    // Log the full request structure for debugging
+    const requestDebug = {
+      model,
+      hasInstructions: !!instructions,
+      hasPreviousResponse: !!previousResponseId,
+      temperature,
+      maxTokens,
+      inputType: typeof input,
+      inputIsArray: Array.isArray(input),
+      inputPreview: JSON.stringify(input).substring(0, 1000)
+    }
+
     httpLogger.createLogEntry('INFO', 'OPENAI_REQUEST',
-      'Starting OpenAI Responses API streaming request', {
-        model,
-        hasInstructions: !!instructions,
-        hasPreviousResponse: !!previousResponseId,
-        temperature,
-        maxTokens,
-        requestBody: JSON.stringify(requestBody).substring(0, 500) // Log first 500 chars
+      'Starting OpenAI Responses API streaming request', requestDebug)
+
+    // Additional detailed logging for debugging image issues
+    if (Array.isArray(input)) {
+      const inputStructure = input.map(item => {
+        const structure = {
+          role: item.role,
+          contentType: typeof item.content,
+          contentIsArray: Array.isArray(item.content)
+        }
+
+        if (Array.isArray(item.content)) {
+          structure.contentLength = item.content.length
+          structure.contentTypes = item.content.map(c => c.type)
+
+          // Log image URLs (first 60 chars to verify format)
+          const imageContent = item.content.filter(c => c.type === 'input_image')
+          if (imageContent.length > 0) {
+            structure.imageUrlPreviews = imageContent.map(img =>
+              img.image_url ? img.image_url.substring(0, 60) + '...' : 'MISSING'
+            )
+          }
+        }
+
+        return structure
       })
+
+      httpLogger.createLogEntry('DEBUG', 'OPENAI_REQUEST_DETAIL',
+        'Input array structure for Responses API', {
+          inputLength: input.length,
+          inputStructure
+        })
+    }
 
     // Log to Supabase for persistent debugging
     await supabaseLogger.logOpenAIStream({
@@ -150,29 +189,39 @@ class OpenAIService {
 
         lastChunkTime = Date.now()
 
-        // Extract content from SDK response
-        // Responses API uses 'output_text' field
-        const content = chunk.output?.[0]?.content?.[0]?.text || chunk.delta
+        // Extract content based on event type
+        // Responses API uses event-based streaming with typed events
+        const eventType = chunk.type || chunk.event
 
-        // Store response ID for conversation chaining
-        if (chunk.id && !responseId) {
+        // Handle different event types
+        if (eventType === 'response.output_text.delta') {
+          // This is a text delta event - contains the actual content chunks
+          const content = chunk.delta
+
+          if (content) {
+            totalChunks++
+            totalContentLength += content.length
+            yield content
+          }
+        } else if (eventType === 'response.created' && chunk.id) {
+          // Store response ID for conversation chaining
           responseId = chunk.id
-        }
-
-        if (content) {
-          totalChunks++
-          totalContentLength += content.length
-          yield content
-        }
-
-        // Check for completion
-        if (chunk.done || chunk.status === 'completed') {
+          httpLogger.createLogEntry('DEBUG', 'OPENAI_STREAM',
+            'Response created event received', { responseId })
+        } else if (eventType === 'response.completed') {
+          // Mark completion
           httpLogger.createLogEntry('INFO', 'OPENAI_STREAM',
             'Stream marked as completed by API', {
               totalChunks,
               totalContentLength,
               responseId
             })
+        } else if (eventType === 'error') {
+          // Handle error events
+          const errorMessage = chunk.error?.message || 'Stream error occurred'
+          httpLogger.createLogEntry('ERROR', 'OPENAI_STREAM',
+            'Error event received', { error: errorMessage })
+          throw new Error(errorMessage)
         }
       }
 
@@ -305,23 +354,29 @@ class OpenAIService {
         throw new Error('No user message found for input')
       }
 
-      input = this.formatMessageContent(latestUserMessage)
+      const formattedContent = this.formatMessageContent(latestUserMessage)
+
+      // IMPORTANT: For Responses API, input should be properly structured
+      // - If content is text only (string), can pass directly as string
+      // - If content is an array (multimodal with files), wrap in role structure
+      if (Array.isArray(formattedContent)) {
+        // Multimodal content (text + files) - wrap in message structure
+        input = [{ role: 'user', content: formattedContent }]
+      } else {
+        // Text-only content - can pass as simple string for cleaner API
+        input = formattedContent
+      }
     } else {
       // First turn or no chaining: Build context in input
-      // Format as array of role/content objects similar to Chat Completions
+      // Format as array of role/content objects per Responses API spec
       const contextMessages = validMessages.slice(-20).map(msg => ({
         role: msg.type === 'user' ? 'user' : 'assistant',
         content: this.formatMessageContent(msg)
       }))
 
-      // For multi-message context, format as structured input
-      if (contextMessages.length === 1) {
-        input = contextMessages[0].content
-      } else {
-        // Multiple messages: create a context structure
-        // Note: This is a workaround since Responses API prefers chaining
-        input = contextMessages
-      }
+      // IMPORTANT: input must ALWAYS be an array of {role, content} objects
+      // Even for single messages, especially when they contain files
+      input = contextMessages
     }
 
     return {
@@ -342,16 +397,9 @@ class OpenAIService {
     if (message.fileAttachments && message.fileAttachments.length > 0) {
       // Multi-content message (text + files)
       const content = []
+      let additionalTextFromFiles = ''
 
-      // Add text content if present
-      if (message.content && message.content.trim() !== '') {
-        content.push({
-          type: 'text',
-          text: message.content
-        })
-      }
-
-      // Add file attachments
+      // Process file attachments first to gather descriptions
       for (const file of message.fileAttachments) {
         if (!file.base64) {
           console.warn('File attachment missing base64 data, skipping:', file.file_name)
@@ -359,23 +407,71 @@ class OpenAIService {
         }
 
         if (file.file_type.startsWith('image/')) {
-          // Image attachment
+          // Image attachment - Send to OpenAI Vision API directly
+          const base64Preview = file.base64.substring(0, 50)
+          httpLogger.createLogEntry('DEBUG', 'OPENAI_FORMAT',
+            'Formatting image for Responses API', {
+              fileName: file.file_name,
+              fileType: file.file_type,
+              base64Preview,
+              base64Length: file.base64.length
+            })
+
           content.push({
-            type: 'image_url',
-            image_url: {
-              url: file.base64
-            }
+            type: 'input_image',
+            image_url: file.base64  // Should be full data URI: data:image/jpeg;base64,...
           })
         } else if (file.file_type === 'application/pdf') {
-          // PDF attachment
+          // PDF attachment - Send to OpenAI directly
           content.push({
-            type: 'file',
-            filename: file.file_name,
-            file_data: file.base64
+            type: 'input_file',
+            file_url: file.base64  // Should be full data URI: data:application/pdf;base64,...
           })
         } else {
-          console.warn('Unsupported file type for OpenAI API:', file.file_type)
+          // Other file types: Use n8n description instead of base64
+          // This handles documents, spreadsheets, audio, video, etc.
+          if (file.n8nDescription) {
+            const fileDesc = `\n\n[File attachment: ${file.file_name} (${file.file_type})]\n` +
+                           `Content description: ${file.n8nDescription}`
+            additionalTextFromFiles += fileDesc
+
+            httpLogger.createLogEntry('DEBUG', 'OPENAI_FORMAT',
+              'Using n8n description for non-image/pdf file', {
+                fileName: file.file_name,
+                fileType: file.file_type,
+                descriptionLength: file.n8nDescription.length
+              })
+          } else {
+            // No description available - note the file but warn user
+            const fileNote = `\n\n[File attachment: ${file.file_name} (${file.file_type})]\n` +
+                           `Note: This file could not be processed. ${file.n8nError || 'Unknown error'}`
+            additionalTextFromFiles += fileNote
+
+            httpLogger.createLogEntry('WARN', 'OPENAI_FORMAT',
+              'File has no n8n description', {
+                fileName: file.file_name,
+                fileType: file.file_type,
+                error: file.n8nError
+              })
+          }
         }
+      }
+
+      // Combine user text with file descriptions
+      let combinedText = message.content && message.content.trim() !== ''
+        ? message.content
+        : ''
+
+      if (additionalTextFromFiles) {
+        combinedText += additionalTextFromFiles
+      }
+
+      // Add combined text as first element if we have any text
+      if (combinedText.trim() !== '') {
+        content.unshift({
+          type: 'input_text',
+          text: combinedText
+        })
       }
 
       return content.length > 0 ? content : message.content
