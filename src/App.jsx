@@ -261,6 +261,9 @@ function App() {
   const [streamingMessageId, setStreamingMessageId] = useState(null)
   const streamingContentRef = useRef('')
 
+  // Textarea ref for auto-resize
+  const textareaRef = useRef(null)
+
   // File upload states
   const [selectedFiles, setSelectedFiles] = useState([])
   const [fileUploadErrors, setFileUploadErrors] = useState([])
@@ -733,6 +736,16 @@ function App() {
     return () => clearInterval(interval)
   }, [])
 
+  // Auto-resize textarea based on content
+  useEffect(() => {
+    if (textareaRef.current) {
+      // Reset height to auto to get the correct scrollHeight
+      textareaRef.current.style.height = 'auto'
+      // Set height to scrollHeight (content height)
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`
+    }
+  }, [inputValue])
+
   const toggleSidebar = () => {
     setSidebarCollapsed(!sidebarCollapsed)
   }
@@ -1196,6 +1209,7 @@ function App() {
   }
 
   const handleKeyPress = (e) => {
+    // Enter sends message, Shift+Enter creates new line
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
@@ -1772,13 +1786,14 @@ function App() {
               maxFiles={3}
               maxSizeBytes={10 * 1024 * 1024}
             />
-            <input
-              type="text"
+            <textarea
+              ref={textareaRef}
+              rows={1}
               placeholder="Type your message here..."
               className="message-input"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyPress}
             />
             {isTyping && streamingMessageId && (
               <button

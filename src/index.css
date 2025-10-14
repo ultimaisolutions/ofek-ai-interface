@@ -75,7 +75,8 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
-input {
+input,
+textarea {
   font-family: inherit;
   border: none;
   background: none;
@@ -83,7 +84,8 @@ input {
   color: var(--text-primary);
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: var(--text-muted);
 }
 
