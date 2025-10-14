@@ -53,6 +53,11 @@
   opacity: 0.7;
 }
 
+/* Material Symbols icon sizing - 20% smaller */
+.drop-zone-icon .material-symbols-outlined {
+  font-size: 1.6rem;
+}
+
 .drop-zone-text {
   display: flex;
   flex-direction: column;
@@ -147,6 +152,11 @@
 .file-icon {
   font-size: 1.5rem;
   flex-shrink: 0;
+}
+
+/* Material Symbols icon sizing for file list icons */
+.file-icon .material-symbols-outlined {
+  font-size: 1.2rem;
 }
 
 .file-details {

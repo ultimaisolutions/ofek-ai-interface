@@ -35,6 +35,11 @@
   flex-shrink: 0;
 }
 
+/* Material Symbols icon sizing - 20% smaller */
+.file-button .material-symbols-outlined {
+  font-size: 1.2rem;
+}
+
 .file-button:hover:not(:disabled) {
   background: var(--glass-bg);
   backdrop-filter: blur(8px);

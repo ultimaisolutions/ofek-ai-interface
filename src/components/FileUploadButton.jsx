@@ -156,7 +156,7 @@ const FileUploadButton = ({ onFilesSelected, disabled = false, maxFiles = 3, max
         disabled={disabled}
         title="Attach files (drag & drop or click)"
       >
-        📎
+        <span className="material-symbols-outlined">attach_file_add</span>
       </button>
     </div>
   )

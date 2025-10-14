@@ -173,7 +173,7 @@ const FileUpload = ({ onFilesSelected, disabled = false, maxFiles = 5, maxSizeBy
     if (fileType.includes('pdf')) return '📄'
     if (fileType.includes('word') || fileType.includes('document')) return '📝'
     if (fileType.includes('sheet') || fileType.includes('excel') || fileType.includes('csv')) return '📊'
-    return '📎'
+    return <span className="material-symbols-outlined">attach_file_add</span>
   }
 
   return (
@@ -198,7 +198,9 @@ const FileUpload = ({ onFilesSelected, disabled = false, maxFiles = 5, maxSizeBy
         onClick={openFileDialog}
       >
         <div className="drop-zone-content">
-          <div className="drop-zone-icon">📎</div>
+          <div className="drop-zone-icon">
+            <span className="material-symbols-outlined">attach_file_add</span>
+          </div>
           <div className="drop-zone-text">
             <div className="primary-text">
               {isDragOver ? 'Drop files here' : 'Click to select files or drag and drop'}
