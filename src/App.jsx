@@ -14,6 +14,7 @@ import supabase from './lib/supabaseClient'
 import conversationStorageService from './services/conversationStorageService'
 import openaiService from './services/openaiService'
 import supabaseLogger from './services/supabaseLoggerService'
+import { detectTextDirection } from './utils/rtlDetection'
 
 function App() {
   // Authentication state
@@ -256,6 +257,9 @@ function App() {
   const [inputValue, setInputValue] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [isSending, setIsSending] = useState(false)
+
+  // RTL support state
+  const [inputDir, setInputDir] = useState('ltr')
 
   // OpenAI streaming states
   const [streamingMessageId, setStreamingMessageId] = useState(null)
@@ -744,6 +748,12 @@ function App() {
       // Set height to scrollHeight (content height)
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`
     }
+  }, [inputValue])
+
+  // Detect text direction for RTL support
+  useEffect(() => {
+    const direction = detectTextDirection(inputValue)
+    setInputDir(direction)
   }, [inputValue])
 
   const toggleSidebar = () => {
@@ -1605,7 +1615,7 @@ function App() {
               // This prevents "disappearing message" bug
               return (
                 <div key={message.id} className="message ai error">
-                  <div className="message-content">
+                  <div className="message-content" dir="ltr" style={{ textAlign: 'left' }}>
                     <MarkdownMessage content="⚠️ Message incomplete - no content received" />
                     <div style={{ fontSize: '0.85em', marginTop: '8px', opacity: 0.7 }}>
                       Debug info: Message ID {message.id.substring(0, 8)}
@@ -1616,9 +1626,12 @@ function App() {
               )
             }
 
+            // Detect text direction for this message
+            const messageDir = detectTextDirection(message.content)
+
             return (
               <div key={message.id} className={`message ${message.type} ${message.isError ? 'error' : ''}`}>
-                <div className="message-content">
+                <div className="message-content" dir={messageDir} style={{ textAlign: messageDir === 'rtl' ? 'right' : 'left' }}>
                   <MarkdownMessage content={message.content} />
 
                   {/* File Context Indicator - Shows AI analyzed files */}
@@ -1801,6 +1814,8 @@ function App() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyPress}
+              dir={inputDir}
+              style={{ textAlign: inputDir === 'rtl' ? 'right' : 'left' }}
             />
             {isTyping && streamingMessageId && (
               <button

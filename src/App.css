@@ -682,6 +682,9 @@
   line-height: 1.5;
   box-shadow: var(--shadow-subtle);
   position: relative;
+  unicode-bidi: plaintext;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .message.user .message-content {
@@ -696,6 +699,26 @@
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   border-bottom-left-radius: 4px;
+}
+
+/* RTL message content support */
+.message-content[dir="rtl"] {
+  text-align: right;
+}
+
+.message-content[dir="ltr"] {
+  text-align: left;
+}
+
+/* Adjust bubble corners for RTL */
+.message.user .message-content[dir="rtl"] {
+  border-bottom-right-radius: 18px;
+  border-bottom-left-radius: 4px;
+}
+
+.message.ai .message-content[dir="rtl"] {
+  border-bottom-left-radius: 18px;
+  border-bottom-right-radius: 4px;
 }
 
 /* Chat Input */
@@ -740,6 +763,17 @@
   word-wrap: break-word;
   white-space: pre-wrap;
   font-family: inherit;
+  unicode-bidi: plaintext;
+  transition: text-align 0.2s ease;
+}
+
+/* RTL text input support */
+.message-input[dir="rtl"] {
+  text-align: right;
+}
+
+.message-input[dir="ltr"] {
+  text-align: left;
 }
 
 .send-btn {
